@@ -306,7 +306,7 @@ You can integrate this library into your project by importing the smartusbhub mo
 
 ### Channel USB Data Line Control
 
-#### `set_channel_dataline(*channels, state)`
+#### `set_channel_usb2_dataline(*channels, state)`
 
 - **Description**: Sets the USB data line (D+ and D-) connection state for the specified channel(s).
 
@@ -323,12 +323,12 @@ You can integrate this library into your project by importing the smartusbhub mo
   Connect the data lines of channel 1:
   
   ```python
-  hub.set_channel_dataline(1,state=1)
+  hub.set_channel_usb2_dataline(1,state=1)
   ```
   
   
 ### Getting Channel USB Data Line Status
-#### `get_channel_dataline_status(*channels)`
+#### `get_channel_usb2_dataline_status(*channels)`
 - **Description**: Queries the USB data line switch status of the specified channel(s).
 
 - **Parameters**:
@@ -342,7 +342,7 @@ You can integrate this library into your project by importing the smartusbhub mo
   Get the data line connection status of channels 1 and 2:
   
   ```python
-  status = hub.get_channel_dataline_status(1, 2)
+  status = hub.get_channel_usb2_dataline_status(1, 2)
   ```
 
 
