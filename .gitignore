@@ -11,3 +11,5 @@ frame_generate.py
 pyproject.toml
 dist
 app
+dist
+*.egg-info

@@ -1,0 +1,29 @@
+[project]
+name = "smartusbhub"
+version = "1.0.2"
+authors = [
+  { name="Jasonzhang", email="embeddedtec@outlook.com" },
+]
+description = "A Python library for SmartUSBHub that provides per-port power and data control, voltage and current monitoring, and manual plug/unplug simulation—designed for development, testing, and device management."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
+
+dependencies = [
+    "colorlog",
+    "numpy",
+    "pyserial",
+]
+
+[project.urls]
+Homepage = "https://github.com/MrzhangF1ghter/smartusbhub"
+Issues = "https://github.com/MrzhangF1ghter/smartusbhub/issues"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["smartusbhub"]
