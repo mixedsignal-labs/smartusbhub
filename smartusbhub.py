@@ -227,6 +227,8 @@ import time
 import threading
 import signal
 import sys
+from functools import wraps
+
 import logging
 import colorlog
 
@@ -304,6 +306,27 @@ ch.setFormatter(console_formatter)
 # Add the handlers to the logger
 logger.addHandler(ch)
 
+# Set this flag to False to disable synchronization locking for testing purposes
+ENABLE_SYNC_LOCK = True
+# Synchronization decorator for thread-safe serial command methods
+def synchronized(method):
+    """Decorator to optionally serialize access to SmartUSBHub methods.
+
+    If ENABLE_SYNC_LOCK is True, the decorated method will acquire the instance's lock before
+    execution. If it is False, the method will run without acquiring the lock, allowing
+    concurrent access for testing.
+    """
+    @wraps(method)
+    def _synchronized(self, *args, **kwargs):
+        if ENABLE_SYNC_LOCK:
+            # Acquire the instance lock to serialize access
+            with self.lock:
+                return method(self, *args, **kwargs)
+        else:
+            # Bypass locking to test behavior without synchronization
+            return method(self, *args, **kwargs)
+    return _synchronized
+
 class SmartUSBHub:
     """
     SmartUSBHub Lib provides a high-level interface for interacting with an industrial Smart USB Hub via UART.
@@ -355,6 +378,8 @@ class SmartUSBHub:
             CMD_GET_HARDWARE_VERSION: threading.Event(),
         }
         
+        self.lock = threading.Lock()  # 用于串口操作的互斥锁
+
         self.callbacks = {cmd: None for cmd in self.ack_events.keys()}
         
         self.poweroff_recover = None
@@ -901,7 +926,7 @@ class SmartUSBHub:
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
         }
         return hub_info
-    
+    @synchronized
     def set_operate_mode(self, mode):
         """
         Set the device's operating mode.
@@ -920,7 +945,7 @@ class SmartUSBHub:
         else:
             logger.error("set_operate_mode No ACK!")
             return False
-
+    @synchronized
     def get_operate_mode(self):
         """
         Sends a command to verify the current operating mode of the device.
@@ -941,7 +966,7 @@ class SmartUSBHub:
             self.operate_mode = None
             logger.warning("get_operate_mode No ACK!")
             return None
-
+    @synchronized
     def set_channel_power(self, *channels, state):
         """
         Sets the power state of one or more USB channels.
@@ -962,7 +987,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_power No ACK!")
             return False
-
+    @synchronized
     def get_channel_power_status(self, *channels):
         """
         Requests the power status of specified channels.
@@ -988,7 +1013,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_power_status No ACK!")
             return None
-
+    @synchronized
     def set_channel_power_interlock(self,channel):
         """
         Sets the interlock mode for a specified channel or all channels.
@@ -1014,7 +1039,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_power_interlock No ACK!")
             return False
-        
+    @synchronized    
     def get_channel_voltage(self, channel):
         """
         Returns the voltage of a single channel.
@@ -1037,7 +1062,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_voltage No ACK!")
             return None
-
+    @synchronized
     def get_channel_current(self, channel):
         """
         Returns the current reading of a single channel.
@@ -1060,7 +1085,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_current No ACK!")
             return None
-
+    @synchronized
     def set_channel_usb2_dataline(self, *channels, state):
         """
         Sends a command to set the data line state of specific channels.
@@ -1079,7 +1104,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb2_dataline No ACK!")
             return False
-
+    @synchronized
     def get_channel_usb2_dataline_status(self, *channels):
         """
         Requests the data line status for specified channels.
@@ -1100,7 +1125,7 @@ class SmartUSBHub:
             logger.error("get_channel_usb2_dataline_status No ACK!")
             return None
 
-
+    @synchronized
     def set_channel_usb3_dataline(self, *channels, state):
         """
         Sends a command to set the USB3 data line state of specific channels.
@@ -1121,7 +1146,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb3_dataline No ACK!")
             return False
-
+    @synchronized
     def get_channel_usb3_dataline_status(self, *channels):
         """
         Requests the USB3 data line status for specified channels.
@@ -1141,7 +1166,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_usb3_dataline_status No ACK!")
             return None
-
+    @synchronized
     def set_channel_low_current(self, *channels, state):
         """ 
         Enables or disables low-current mode for one or more channels.
@@ -1162,7 +1187,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_low_current No ACK!")
             return False
-
+    @synchronized
     def get_channel_low_current_status(self, *channels):
         """
         Requests low-current mode status for specified channels.
@@ -1182,7 +1207,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_low_current_status No ACK!")
             return None
-        
+    @synchronized
     def set_button_control(self, enable: bool):
         """
         Sends a command to set the USB3 data line state of specific channels.
@@ -1202,7 +1227,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb3_dataline No ACK!")
             return False
-
+    @synchronized
     def get_channel_usb3_dataline_status(self, *channels):
         """
         Requests the USB3 data line status for specified channels.
@@ -1222,7 +1247,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_usb3_dataline_status No ACK!")
             return None
-
+    @synchronized
     def set_channel_low_current(self, *channels, state):
         """ 
         Enables or disables low-current mode for one or more channels.
@@ -1243,7 +1268,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_low_current No ACK!")
             return False
-
+    @synchronized
     def get_channel_low_current_status(self, *channels):
         """
         Requests low-current mode status for specified channels.
@@ -1263,7 +1288,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_low_current_status No ACK!")
             return None
-        
+    @synchronized
     def set_button_control(self, enable: bool):
         """
         Enable or disable the hub's physical buttons.
@@ -1285,7 +1310,7 @@ class SmartUSBHub:
         else:
             logger.error("set_button_control No ACK!")
             return False
-
+    @synchronized
     def get_button_control_status(self):
         """
         Query whether the hub's physical buttons are enabled or disabled.
@@ -1302,7 +1327,7 @@ class SmartUSBHub:
         else:
             logger.error("get_button_control_status No ACK!")
             return None
-
+    @synchronized
     def set_default_power_status(self,*channels,enable,status=None):
         """
         Sets the default power status for one or more channels.
@@ -1326,7 +1351,7 @@ class SmartUSBHub:
         else:
             logger.error("set_default_power_status No ACK!")
             return False
-
+    @synchronized
     def get_default_power_status(self,*channels):
         """
         Retrieves the default power status configuration for specified channels.
@@ -1356,7 +1381,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_power_status No ACK!")
             return None
-    
+    @synchronized
     def set_default_dataline_status(self,*channels,enable,status=None):
         """
         Sets the default dataline status for one or more channels.
@@ -1380,7 +1405,7 @@ class SmartUSBHub:
         else:
             logger.error("set_default_dataline_status No ACK!")
             return False
-
+    @synchronized
     def get_default_dataline_status(self,*channels):
         """
         Retrieves the default dataline status configuration for specified channels.
@@ -1410,7 +1435,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_dataline_status No ACK!")
             return None
-        
+    @synchronized    
     def set_auto_restore(self,enable:bool):
         """
         Enables or disables the auto-restore feature.
@@ -1432,7 +1457,7 @@ class SmartUSBHub:
         else:
             logger.error("set_auto_restore No ACK!")
             return False
-
+    @synchronized
     def get_auto_restore_status(self):
         """
         Queries whether auto-restore is enabled.
@@ -1449,7 +1474,7 @@ class SmartUSBHub:
         else:
             logger.error("get_auto_restore_status No ACK!")
             return None
-
+    @synchronized
     def set_device_address(self, address: int):
         """
         Set the device address (uint16) for this Hub.
@@ -1474,7 +1499,7 @@ class SmartUSBHub:
         else:
             logger.error("set_device_address No ACK!")
             return False
-
+    @synchronized
     def get_device_address(self):
         """
         Get the current device address from the Hub.
@@ -1492,7 +1517,7 @@ class SmartUSBHub:
         else:
             logger.error("get_device_address No ACK!")
             return None        
-        
+    @synchronized
     def factory_reset(self):
         """
         Sends a command to reset the device to factory settings.
@@ -1509,7 +1534,7 @@ class SmartUSBHub:
         else:
             logger.error("factory_reset No ACK!")
             return False
-        
+    @synchronized
     def get_firmware_version(self):
         """
         Query the device's firmware version.
@@ -1526,7 +1551,7 @@ class SmartUSBHub:
         else:
             logger.error("get_firmware_version No ACK!")
             return None
-
+    @synchronized
     def get_hardware_version(self):
         """
         Query the device's hardware version.
