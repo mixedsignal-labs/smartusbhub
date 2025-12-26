@@ -354,7 +354,7 @@ class TestManager:
                     process.join()
         print("[TestManager] 所有进程已停止")
         
-    def run_test(self, channels=[1, 2, 3, 4], sleep_after_on=0.01, sleep_after_off=0.01, 
+    def run_test(self, channels=[1, 2, 3, 4], sleep_after_on=0.1, sleep_after_off=0.1, 
                  duration=None, max_iterations=None, report_interval=10):
         """
         运行测试
@@ -594,10 +594,10 @@ def main():
     parser = argparse.ArgumentParser(description='SmartUSBHub 成功率测试程序')
     parser.add_argument('--channels', type=int, nargs='+', default=[1, 2, 3, 4],
                         help='要测试的通道列表 (默认: 1 2 3 4)')
-    parser.add_argument('--sleep-after-on', type=float, default=0.01,
-                        help='开启电源后的等待时间（秒）(默认: 0.01)')
-    parser.add_argument('--sleep-after-off', type=float, default=0.01,
-                        help='关闭电源后的等待时间（秒）(默认: 0.01)')
+    parser.add_argument('--sleep-after-on', type=float, default=0.1,
+                        help='开启电源后的等待时间（秒）(默认: 0.1)')
+    parser.add_argument('--sleep-after-off', type=float, default=0.1,
+                        help='关闭电源后的等待时间（秒）(默认: 0.1)')
     parser.add_argument('--duration', type=int, default=None,
                         help='测试持续时间（秒），不指定则无限运行')
     parser.add_argument('--max-iterations', type=int, default=None,
