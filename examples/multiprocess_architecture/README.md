@@ -27,7 +27,7 @@
 - `business_process_4.py`: 业务进程4，控制USB端口4
 - `business_process_template.py`: 业务进程模板，可用于创建新的业务进程
 - `run_all.py`: 主启动脚本，启动所有进程
-- `stress_test.py`: 压力测试程序，覆盖各种并发冲突场景
+- `success_rate_test.py`: 压力测试程序，覆盖各种并发冲突场景
 
 ## 使用方法
 
