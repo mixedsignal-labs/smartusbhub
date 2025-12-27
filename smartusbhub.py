@@ -284,7 +284,7 @@ OPERATE_MODE_INTERLOCK = 1
 # Configure logging
 logger = logging.getLogger(__name__)
 # log level
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.INFO)
 
 # Create console handler with a higher log level
 ch = colorlog.StreamHandler()
@@ -307,7 +307,7 @@ ch.setFormatter(console_formatter)
 logger.addHandler(ch)
 
 # Set this flag to False to disable synchronization locking for testing purposes
-ENABLE_SYNC_LOCK = True
+ENABLE_SYNC_LOCK = False
 # Synchronization decorator for thread-safe serial command methods
 def synchronized(method):
     """Decorator to optionally serialize access to SmartUSBHub methods.
@@ -379,6 +379,16 @@ class SmartUSBHub:
         }
         
         self.lock = threading.Lock()  # 用于串口操作的互斥锁
+        
+        # 串口发送同步锁（即使 ENABLE_SYNC_LOCK = False 也保护串口发送，避免命令交错）
+        self._send_lock = threading.Lock()
+        self._last_send_time = 0  # 上次发送命令的时间戳
+        # 最小发送间隔：确保命令之间至少间隔一定时间，避免 MCU 状态机混乱
+        # 即使 ENABLE_SYNC_LOCK = False，也通过此机制保证串口命令不会交错
+        self._min_send_interval = 0.010  # 最小发送间隔 10ms
+        # MCU 响应等待时间：发送命令后等待 MCU 开始响应的时间
+        # 这确保 MCU 有时间处理命令并开始发送 ACK，实现命令-响应同步
+        self._mcu_response_wait = 0.005  # 5ms，让 MCU 有时间处理命令并开始发送 ACK
 
         self.callbacks = {cmd: None for cmd in self.ack_events.keys()}
         
@@ -404,11 +414,18 @@ class SmartUSBHub:
         self.device_address = None
 
         self.disconnect_callback = None
+        
+        # 错误恢复机制：跟踪连续失败次数
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5  # 连续5次失败后触发恢复
 
         self._start()
+        # 等待 MCU 状态机恢复（如果之前处于错误状态）
+        # MCU 的状态卡住检测是 100ms，超时检测是 20ms，所以等待 150ms 确保恢复
+        time.sleep(0.15)
         self.get_device_info()
         
-        if self.get_operate_mode is None:
+        if self.operate_mode is None:
             logger.error("Failed to get operate mode.")
             sys.exit(1)
             
@@ -728,13 +745,86 @@ class SmartUSBHub:
         # Add checksum to packet
         packet.append(checksum)
 
-        # Send the packet
-        if self.ser and self.ser.is_open:
-            self.ser.write(packet)
-
-        logger.debug(f"Sent command: {packet.hex()}")
+        # 串口发送同步：即使 ENABLE_SYNC_LOCK = False，也保护串口发送避免命令交错
+        # 同时确保命令之间有最小间隔，并等待 MCU 响应（实现命令-响应同步）
+        with self._send_lock:
+            # 确保命令之间有最小间隔
+            current_time = time.time()
+            time_since_last_send = current_time - self._last_send_time
+            if time_since_last_send < self._min_send_interval:
+                # 如果距离上次发送时间太短，等待到最小间隔
+                time.sleep(self._min_send_interval - time_since_last_send)
+            
+            # Send the packet
+            if self.ser and self.ser.is_open:
+                self.ser.write(packet)
+            
+            # 记录发送时间
+            self._last_send_time = time.time()
+            
+            # 等待 MCU 开始响应（给 MCU 时间处理命令并开始发送 ACK）
+            # 这是与 MCU 之间的同步机制：确保 MCU 有时间处理命令后再发送下一个
+            time.sleep(self._mcu_response_wait)
+            
+            logger.debug(f"Sent command: {packet.hex()}")
 
         return packet
+    
+    def _wait_for_ack_with_recovery(self, cmd, timeout=None):
+        """
+        等待 ACK，如果连续失败则触发 MCU 状态机恢复机制。
+        
+        Args:
+            cmd: 命令代码
+            timeout: 超时时间，如果为 None 则使用 self.com_timeout
+            
+        Returns:
+            bool: 如果收到 ACK 返回 True，否则返回 False
+        """
+        if timeout is None:
+            timeout = self.com_timeout
+        
+        ack_event = self.ack_events.get(cmd)
+        if not ack_event:
+            return False
+        
+        ack_event.clear()
+        success = ack_event.wait(timeout)
+        
+        if success:
+            # 成功时重置失败计数
+            self._consecutive_failures = 0
+            return True
+        else:
+            # 失败时增加计数
+            self._consecutive_failures += 1
+            
+            # 如果连续失败次数超过阈值，触发恢复机制
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                logger.warning(f"Too many consecutive failures ({self._consecutive_failures}), triggering MCU recovery...")
+                self._trigger_mcu_recovery()
+                # 重置失败计数，给 MCU 一次恢复的机会
+                self._consecutive_failures = 0
+            
+            return False
+    
+    def _trigger_mcu_recovery(self):
+        """
+        触发 MCU 状态机恢复机制：
+        1. 等待足够时间让 MCU 自动恢复（MCU 的状态卡住检测是 100ms，超时检测是 20ms）
+        2. 清空串口缓冲区
+        """
+        logger.debug("Triggering MCU state machine recovery...")
+        time.sleep(0.15)  # 等待 150ms 让 MCU 状态机恢复
+        
+        # 清空输入缓冲区
+        if self.ser and self.ser.is_open:
+            try:
+                if self.ser.in_waiting > 0:
+                    self.ser.reset_input_buffer()
+                    logger.debug("Cleared input buffer during recovery")
+            except Exception as e:
+                logger.warning(f"Failed to clear input buffer: {e}")
 
     def _handle_set_operate_mode(self):
         logger.debug("_handle_set_operate_mode ACK")
@@ -900,21 +990,71 @@ class SmartUSBHub:
         logger.debug(f"_handle_get_auto_restore_status ACK,value:{value}")
         self.auto_restore_status = value
 
+    def _retry_get_info(self, get_func, info_name, max_retry_time=10.0):
+        """
+        重试获取设备信息，直到成功或超时（至少尝试10秒）
+        
+        Args:
+            get_func: 获取信息的函数（无参数）
+            info_name: 信息名称（用于日志）
+            max_retry_time: 最大重试时间（秒），默认10秒
+            
+        Returns:
+            获取到的信息值，如果超时则返回None
+        """
+        start_time = time.time()
+        retry_count = 0
+        
+        while True:
+            result = get_func()
+            if result is not None:
+                logger.debug(f"{info_name} retrieved successfully after {retry_count} retries, {time.time() - start_time:.2f}s")
+                return result
+            
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= max_retry_time:
+                logger.error(f"{info_name} failed after {retry_count} retries, {elapsed_time:.2f}s - giving up")
+                return None
+            
+            retry_count += 1
+            # 重试间隔：前几次快速重试，之后逐渐增加间隔
+            if retry_count <= 3:
+                time.sleep(0.05)  # 50ms
+            elif retry_count <= 10:
+                time.sleep(0.1)    # 100ms
+            else:
+                time.sleep(0.2)    # 200ms
+            
+            logger.debug(f"{info_name} retry {retry_count}, elapsed: {elapsed_time:.2f}s")
+
     def get_device_info(self):
         """
         Returns the hub's ID, hardware version, firmware version, operate mode, and button control status.
+        所有关键信息都会重试直到成功或至少尝试10秒。
 
         Returns:
             dict: A dictionary containing the hub's information.
         """
-        self.hardware_version = self.get_hardware_version()
-        self.firmware_version =  self.get_firmware_version()
-        self.operate_mode = self.get_operate_mode()
-        self.auto_restore_status = self.get_auto_restore_status()
-        self.button_control_status = self.get_button_control_status()
-        self.device_address = self.get_device_address()
-        self.channel_default_power_status = self.get_default_power_status(1,2,3,4)
-        self.channel_default_dataline_status = self.get_default_dataline_status(1,2,3,4)
+        # 重试获取所有关键信息，至少尝试10秒
+        # 使用重试机制确保在设备初始化或恢复期间也能成功获取信息
+        logger.info("Getting device info with retry mechanism (max 10s per item)...")
+        
+        self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
+        self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
+        self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
+        self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
+        self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
+        self.device_address = self._retry_get_info(self.get_device_address, "device_address")
+        
+        # 获取默认状态，如果失败则保持原有值（不覆盖为None）
+        # 这些不是关键信息，所以不强制重试
+        default_power = self.get_default_power_status(1,2,3,4)
+        if default_power is not None:
+            self.channel_default_power_status = default_power
+        
+        default_dataline = self.get_default_dataline_status(1,2,3,4)
+        if default_dataline is not None:
+            self.channel_default_dataline_status = default_dataline
 
         hub_info = {
             "id": self.port.split("/")[-1],
@@ -925,7 +1065,17 @@ class SmartUSBHub:
             "auto_restore": "enabled" if self.auto_restore_status == 1 else "disabled",
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
         }
+        
+        # 检查关键信息是否都获取成功
+        if self.operate_mode is None:
+            logger.error("Failed to get operate mode after retries - this is critical!")
+        if self.hardware_version is None:
+            logger.warning("Failed to get hardware_version after retries")
+        if self.firmware_version is None:
+            logger.warning("Failed to get firmware_version after retries")
+            
         return hub_info
+        
     @synchronized
     def set_operate_mode(self, mode):
         """
@@ -937,14 +1087,13 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
         """
         self._send_packet(CMD_SET_OPERATE_MODE, None, mode)
-        ack_event = self.ack_events[CMD_SET_OPERATE_MODE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_OPERATE_MODE):
             logger.debug("set_operate_mode ACK")
             return True
         else:
             logger.error("set_operate_mode No ACK!")
             return False
+
     @synchronized
     def get_operate_mode(self):
         """
@@ -954,9 +1103,7 @@ class SmartUSBHub:
             bool: True if the device responds in the expected mode, otherwise False.
         """
         command = self._send_packet(CMD_GET_OPERATE_MODE, None, None)
-        ack_event = self.ack_events[CMD_GET_OPERATE_MODE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_GET_OPERATE_MODE):  
             logger.debug("get_operate_mode ACK")
             logger.debug(f"operate_mode: {self.operate_mode}")
             if self.operate_mode is None:
@@ -966,6 +1113,7 @@ class SmartUSBHub:
             self.operate_mode = None
             logger.warning("get_operate_mode No ACK!")
             return None
+
     @synchronized
     def set_channel_power(self, *channels, state):
         """
@@ -979,14 +1127,13 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
         """
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
             logger.debug("set_channel_power ACK")
             return True
         else:
             logger.error("set_channel_power No ACK!")
             return False
+
     @synchronized
     def get_channel_power_status(self, *channels):
         """
@@ -1013,6 +1160,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_power_status No ACK!")
             return None
+
     @synchronized
     def set_channel_power_interlock(self,channel):
         """
@@ -1039,6 +1187,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_power_interlock No ACK!")
             return False
+
     @synchronized    
     def get_channel_voltage(self, channel):
         """
@@ -1062,6 +1211,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_voltage No ACK!")
             return None
+
     @synchronized
     def get_channel_current(self, channel):
         """
@@ -1085,6 +1235,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_current No ACK!")
             return None
+            
     @synchronized
     def set_channel_usb2_dataline(self, *channels, state):
         """
@@ -1104,6 +1255,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb2_dataline No ACK!")
             return False
+
     @synchronized
     def get_channel_usb2_dataline_status(self, *channels):
         """
@@ -1146,6 +1298,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb3_dataline No ACK!")
             return False
+
     @synchronized
     def get_channel_usb3_dataline_status(self, *channels):
         """
@@ -1166,6 +1319,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_usb3_dataline_status No ACK!")
             return None
+
     @synchronized
     def set_channel_low_current(self, *channels, state):
         """ 
@@ -1187,6 +1341,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_low_current No ACK!")
             return False
+
     @synchronized
     def get_channel_low_current_status(self, *channels):
         """
@@ -1207,6 +1362,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_low_current_status No ACK!")
             return None
+
     @synchronized
     def set_button_control(self, enable: bool):
         """
@@ -1227,6 +1383,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_usb3_dataline No ACK!")
             return False
+
     @synchronized
     def get_channel_usb3_dataline_status(self, *channels):
         """
@@ -1247,6 +1404,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_usb3_dataline_status No ACK!")
             return None
+
     @synchronized
     def set_channel_low_current(self, *channels, state):
         """ 
@@ -1268,6 +1426,7 @@ class SmartUSBHub:
         else:
             logger.error("set_channel_low_current No ACK!")
             return False
+
     @synchronized
     def get_channel_low_current_status(self, *channels):
         """
@@ -1288,6 +1447,7 @@ class SmartUSBHub:
         else:
             logger.error("get_channel_low_current_status No ACK!")
             return None
+
     @synchronized
     def set_button_control(self, enable: bool):
         """
@@ -1310,6 +1470,7 @@ class SmartUSBHub:
         else:
             logger.error("set_button_control No ACK!")
             return False
+
     @synchronized
     def get_button_control_status(self):
         """
@@ -1319,14 +1480,13 @@ class SmartUSBHub:
             int or None: 1 if enabled, 0 if disabled, or None if no response.
         """
         self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
-        ack_event = self.ack_events[CMD_GET_BUTTON_CONTROL_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_GET_BUTTON_CONTROL_STATUS):
             logger.debug("get_button_control_status ACK")
             return self.button_control_status
         else:
             logger.error("get_button_control_status No ACK!")
             return None
+
     @synchronized
     def set_default_power_status(self,*channels,enable,status=None):
         """
@@ -1351,6 +1511,7 @@ class SmartUSBHub:
         else:
             logger.error("set_default_power_status No ACK!")
             return False
+
     @synchronized
     def get_default_power_status(self,*channels):
         """
@@ -1363,9 +1524,7 @@ class SmartUSBHub:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
         self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels,[0,0])
-        ack_event = self.ack_events[CMD_GET_DEFAULT_POWER_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_GET_DEFAULT_POWER_STATUS):  
             logger.debug("get_default_power_status ACK")
             result = {}
             for ch in channels:
@@ -1381,6 +1540,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_power_status No ACK!")
             return None
+
     @synchronized
     def set_default_dataline_status(self,*channels,enable,status=None):
         """
@@ -1405,6 +1565,7 @@ class SmartUSBHub:
         else:
             logger.error("set_default_dataline_status No ACK!")
             return False
+
     @synchronized
     def get_default_dataline_status(self,*channels):
         """
@@ -1417,9 +1578,7 @@ class SmartUSBHub:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
         self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels,[0,0])
-        ack_event = self.ack_events[CMD_GET_DEFAULT_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_GET_DEFAULT_DATALINE_STATUS):  
             logger.debug("get_default_dataline_status ACK")
             result = {}
             for ch in channels:
@@ -1435,6 +1594,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_dataline_status No ACK!")
             return None
+
     @synchronized    
     def set_auto_restore(self,enable:bool):
         """
@@ -1457,6 +1617,7 @@ class SmartUSBHub:
         else:
             logger.error("set_auto_restore No ACK!")
             return False
+
     @synchronized
     def get_auto_restore_status(self):
         """
@@ -1466,14 +1627,13 @@ class SmartUSBHub:
             int or None: 1 if auto-restore is enabled, 0 if disabled, or None if no response.
         """
         self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
-        ack_event = self.ack_events[CMD_GET_AUTO_RESTORE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_GET_AUTO_RESTORE_STATUS):
             logger.debug("get_auto_restore_status ACK")
             return self.auto_restore_status
         else:
             logger.error("get_auto_restore_status No ACK!")
             return None
+
     @synchronized
     def set_device_address(self, address: int):
         """
@@ -1499,6 +1659,7 @@ class SmartUSBHub:
         else:
             logger.error("set_device_address No ACK!")
             return False
+
     @synchronized
     def get_device_address(self):
         """
@@ -1508,15 +1669,13 @@ class SmartUSBHub:
             16-bit device address or None if no response.
         """
         self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
-
-        ack_event = self.ack_events[CMD_GET_DEVICE_ADDRESS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_GET_DEVICE_ADDRESS):
             logger.debug("get_device_address ACK")
             return self.device_address
         else:
             logger.error("get_device_address No ACK!")
-            return None        
+            return None
+
     @synchronized
     def factory_reset(self):
         """
@@ -1534,6 +1693,7 @@ class SmartUSBHub:
         else:
             logger.error("factory_reset No ACK!")
             return False
+
     @synchronized
     def get_firmware_version(self):
         """
@@ -1543,14 +1703,13 @@ class SmartUSBHub:
             int or None: The firmware version, or None if no response.
         """
         self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
-        ack_event = self.ack_events[CMD_GET_FIRMWARE_VERSION]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_GET_FIRMWARE_VERSION):
             logger.debug("get_firmware_version ACK")
             return self.firmware_version
         else:
             logger.error("get_firmware_version No ACK!")
             return None
+
     @synchronized
     def get_hardware_version(self):
         """
@@ -1560,9 +1719,7 @@ class SmartUSBHub:
             int or None: The hardware version, or None if no response.
         """
         self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
-        ack_event = self.ack_events[CMD_GET_HARDWARE_VERSION]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_GET_HARDWARE_VERSION):
             logger.debug("get_hardware_version ACK")
             return self.hardware_version
         else:
