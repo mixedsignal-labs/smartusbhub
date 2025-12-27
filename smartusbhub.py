@@ -265,8 +265,9 @@ CMD_GET_OPERATE_MODE                = 0x07
 CMD_SET_DEVICE_ADDRESS              = 0x11
 CMD_GET_DEVICE_ADDRESS              = 0x12
 
-CMD_SET_CHANNEL_LOW_CURRENT         = 0x13
-CMD_GET_CHANNEL_LOW_CURRENT         = 0x14
+CMD_SET_CHANNEL_SLOW_CHARGE         = 0x13
+CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
+CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
 CMD_FACTORY_RESET                   = 0xFC   
 CMD_GET_FIRMWARE_VERSION            = 0xFD
@@ -361,8 +362,9 @@ class SmartUSBHub:
             CMD_GET_CHANNEL_DATALINE_STATUS: threading.Event(),
             CMD_SET_CHANNEL_USB3_DATALINE: threading.Event(),
             CMD_GET_CHANNEL_USB3_DATALINE_STATUS: threading.Event(),
-            CMD_SET_CHANNEL_LOW_CURRENT: threading.Event(),
-            CMD_GET_CHANNEL_LOW_CURRENT: threading.Event(),
+            CMD_SET_CHANNEL_SLOW_CHARGE: threading.Event(),
+            CMD_SET_CHANNEL_FAST_CHARGE: threading.Event(),
+            CMD_GET_CHANNEL_CHARGE_MODE: threading.Event(),
             CMD_SET_BUTTON_CONTROL: threading.Event(),
             CMD_GET_BUTTON_CONTROL_STATUS: threading.Event(),
             CMD_SET_DEFAULT_POWER_STATUS: threading.Event(),
@@ -409,7 +411,7 @@ class SmartUSBHub:
         self.channel_usb3_dataline_status = {}
         self.channel_voltages = {}
         self.channel_currents = {}
-        self.channel_low_current_status = {}
+        self.channel_charge_modes = {}
 
         self.device_address = None
 
@@ -632,10 +634,12 @@ class SmartUSBHub:
                                 self._handle_set_channel_usb3_dataline(channel, value)
                             elif cmd == CMD_GET_CHANNEL_USB3_DATALINE_STATUS:
                                 self._handle_get_channel_usb3_dataline(channel, value)
-                            elif cmd == CMD_SET_CHANNEL_LOW_CURRENT:
-                                self._handle_set_channel_low_current(channel, value)
-                            elif cmd == CMD_GET_CHANNEL_LOW_CURRENT:
-                                self._handle_get_channel_low_current(channel, value)
+                            elif cmd == CMD_SET_CHANNEL_SLOW_CHARGE:
+                                self._handle_set_channel_slow_charge(channel, value)
+                            elif cmd == CMD_SET_CHANNEL_FAST_CHARGE:
+                                self._handle_set_channel_fast_charge(channel, value)
+                            elif cmd == CMD_GET_CHANNEL_CHARGE_MODE:
+                                self._handle_get_channel_charge_mode(channel, value)
                             elif cmd == CMD_SET_BUTTON_CONTROL:
                                 self._handle_set_button_control()
                             elif cmd == CMD_GET_BUTTON_CONTROL_STATUS:
@@ -897,19 +901,25 @@ class SmartUSBHub:
             self.channel_usb3_dataline_status[ch] = value
             logger.debug(f"Get Channel USB3 Dataline: ch{ch} = {value}")
 
-    def _handle_set_channel_low_current(self, channel, value):
-        logger.debug("_handle_set_channel_low_current ACK")
+    def _handle_set_channel_slow_charge(self, channel, value):
+        logger.debug("_handle_set_channel_slow_charge ACK")
         channels = self._convert_channel(channel)
         for ch in channels:
-            self.channel_low_current_status[ch] = value
-            logger.debug(f"Set Channel Low Current: ch{ch} = {value}")
+            logger.debug(f"Set Channel Slow Charge: ch{ch} = enabled")
 
-    def _handle_get_channel_low_current(self, channel, value):
-        logger.debug("_handle_get_channel_low_current ACK")
+    def _handle_set_channel_fast_charge(self, channel, value):
+        logger.debug("_handle_set_channel_fast_charge ACK")
         channels = self._convert_channel(channel)
         for ch in channels:
-            self.channel_low_current_status[ch] = value
-            logger.debug(f"Get Channel Low Current: ch{ch} = {value}")
+            logger.debug(f"Set Channel Fast Charge: ch{ch} = enabled")
+
+    def _handle_get_channel_charge_mode(self, channel, value):
+        logger.debug("_handle_get_channel_charge_mode ACK")
+        channels = self._convert_channel(channel)
+        for ch in channels:
+            self.channel_charge_modes[ch] = value
+            mode_str = "off" if value == 0 else ("fast_charge" if value == 1 else "slow_charge")
+            logger.debug(f"Get Channel Charge Mode: ch{ch} = {mode_str} ({value})")
 
     def _handle_get_button_control(self, value):
         logger.debug("_handle_get_button_control ACK")
@@ -1341,131 +1351,75 @@ class SmartUSBHub:
             return None
 
     @synchronized
-    def set_channel_low_current(self, *channels, state):
-        """ 
-        Enables or disables low-current mode for one or more channels.
+    def set_channel_slow_charge(self, *channels):
+        """
+        Enables slow charge mode for one or more channels.
+        Slow charge mode limits the charging current (enables ilim).
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
-            state (int): True to enable low-current mode; False to disable.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
-        self._send_packet(CMD_SET_CHANNEL_LOW_CURRENT, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_LOW_CURRENT]
+        self._send_packet(CMD_SET_CHANNEL_SLOW_CHARGE, channels, 1)
+        ack_event = self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE]
         ack_event.clear()
         if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_low_current ACK")
+            logger.debug("set_channel_slow_charge ACK")
             return True
         else:
-            logger.error("set_channel_low_current No ACK!")
+            logger.error("set_channel_slow_charge No ACK!")
             return False
 
     @synchronized
-    def get_channel_low_current_status(self, *channels):
+    def set_channel_fast_charge(self, *channels):
         """
-        Requests low-current mode status for specified channels.
-
-        Args:
-            *channels (int): Channels to query.
-
-        Returns:
-            dict or None: A dictionary with channel numbers as keys and low-current states as values, or None if timed out.
-        """
-        self._send_packet(CMD_GET_CHANNEL_LOW_CURRENT, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_LOW_CURRENT]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_low_current_status ACK")
-            return self.channel_low_current_status
-        else:
-            logger.error("get_channel_low_current_status No ACK!")
-            return None
-
-    @synchronized
-    def set_button_control(self, enable: bool):
-        """
-        Sends a command to set the USB3 data line state of specific channels.
-
-        Args:
-            enable (bool): True to enable buttons, False to disable.
-
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
-        """
-        self._send_packet(CMD_SET_CHANNEL_USB3_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_USB3_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_usb3_dataline ACK")
-            return True
-        else:
-            logger.error("set_channel_usb3_dataline No ACK!")
-            return False
-
-    @synchronized
-    def get_channel_usb3_dataline_status(self, *channels):
-        """
-        Requests the USB3 data line status for specified channels.
-
-        Args:
-            *channels (int): Channels to query.
-
-        Returns:
-            dict or None: A dictionary with channel numbers as keys and USB3 data line states as values, or None if timed out.
-        """
-        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_usb3_dataline_status ACK")
-            return self.channel_usb3_dataline_status
-        else:
-            logger.error("get_channel_usb3_dataline_status No ACK!")
-            return None
-
-    @synchronized
-    def set_channel_low_current(self, *channels, state):
-        """ 
-        Enables or disables low-current mode for one or more channels.
+        Enables fast charge mode for one or more channels.
+        Fast charge mode provides full power (disables ilim, enables VBUS).
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
-            state (int): True to enable low-current mode; False to disable.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
-        self._send_packet(CMD_SET_CHANNEL_LOW_CURRENT, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_LOW_CURRENT]
+        self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, channels, 1)
+        ack_event = self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE]
         ack_event.clear()
         if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_low_current ACK")
+            logger.debug("set_channel_fast_charge ACK")
             return True
         else:
-            logger.error("set_channel_low_current No ACK!")
+            logger.error("set_channel_fast_charge No ACK!")
             return False
 
     @synchronized
-    def get_channel_low_current_status(self, *channels):
+    def get_channel_charge_mode(self, *channels):
         """
-        Requests low-current mode status for specified channels.
+        Requests the charge mode for specified channels.
 
         Args:
             *channels (int): Channels to query.
 
         Returns:
-            dict or None: A dictionary with channel numbers as keys and low-current states as values, or None if timed out.
+            dict or None: A dictionary with channel numbers as keys and charge modes as values.
+                          Charge mode values: 0=off, 1=fast_charge, 2=slow_charge.
+                          Returns None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_LOW_CURRENT, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_LOW_CURRENT]
+        self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
+        ack_event = self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE]
         ack_event.clear()
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_low_current_status ACK")
-            return self.channel_low_current_status
+            logger.debug("get_channel_charge_mode ACK")
+            result = {}
+            for ch in channels:
+                mode = self.channel_charge_modes.get(ch)
+                if mode is not None:
+                    result[ch] = mode
+            return result if result else None
         else:
-            logger.error("get_channel_low_current_status No ACK!")
+            logger.error("get_channel_charge_mode No ACK!")
             return None
 
     @synchronized

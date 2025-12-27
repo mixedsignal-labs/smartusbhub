@@ -22,8 +22,9 @@ REQUEST_TYPE_SET_CHANNEL_USB3_DATALINE = 'set_channel_usb3_dataline'
 REQUEST_TYPE_GET_CHANNEL_USB3_DATALINE_STATUS = 'get_channel_usb3_dataline_status'
 REQUEST_TYPE_GET_CHANNEL_VOLTAGE = 'get_channel_voltage'
 REQUEST_TYPE_GET_CHANNEL_CURRENT = 'get_channel_current'
-REQUEST_TYPE_SET_CHANNEL_LOW_CURRENT = 'set_channel_low_current'
-REQUEST_TYPE_GET_CHANNEL_LOW_CURRENT_STATUS = 'get_channel_low_current_status'
+REQUEST_TYPE_SET_CHANNEL_SLOW_CHARGE = 'set_channel_slow_charge'
+REQUEST_TYPE_SET_CHANNEL_FAST_CHARGE = 'set_channel_fast_charge'
+REQUEST_TYPE_GET_CHANNEL_CHARGE_MODE = 'get_channel_charge_mode'
 REQUEST_TYPE_SHUTDOWN = 'shutdown'
 
 
@@ -134,11 +135,14 @@ class SmartUSBHubServer:
             elif request_type == REQUEST_TYPE_GET_CHANNEL_CURRENT:
                 result = self.hub.get_channel_current(*args)
                 
-            elif request_type == REQUEST_TYPE_SET_CHANNEL_LOW_CURRENT:
-                result = self.hub.set_channel_low_current(*args, **kwargs)
+            elif request_type == REQUEST_TYPE_SET_CHANNEL_SLOW_CHARGE:
+                result = self.hub.set_channel_slow_charge(*args)
                 
-            elif request_type == REQUEST_TYPE_GET_CHANNEL_LOW_CURRENT_STATUS:
-                result = self.hub.get_channel_low_current_status(*args)
+            elif request_type == REQUEST_TYPE_SET_CHANNEL_FAST_CHARGE:
+                result = self.hub.set_channel_fast_charge(*args)
+                
+            elif request_type == REQUEST_TYPE_GET_CHANNEL_CHARGE_MODE:
+                result = self.hub.get_channel_charge_mode(*args)
                 
             elif request_type == REQUEST_TYPE_SHUTDOWN:
                 self.running = False

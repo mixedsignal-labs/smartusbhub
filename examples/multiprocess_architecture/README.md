@@ -78,8 +78,9 @@ python stress_test.py --test-type same_channel_conflict --workers 15 --duration 
 - `get_channel_usb3_dataline_status(*channels)`: 获取USB3数据线状态
 - `get_channel_voltage(channel)`: 获取通道电压
 - `get_channel_current(channel)`: 获取通道电流
-- `set_channel_low_current(*channels, state)`: 设置通道低电流模式
-- `get_channel_low_current_status(*channels)`: 获取通道低电流模式状态
+- `set_channel_slow_charge(*channels)`: 设置通道慢充模式（限流）
+- `set_channel_fast_charge(*channels)`: 设置通道快充模式（全功率）
+- `get_channel_charge_mode(*channels)`: 获取通道充电模式状态（返回值：0=off, 1=fast_charge, 2=slow_charge）
 
 ## 进程间通信
 

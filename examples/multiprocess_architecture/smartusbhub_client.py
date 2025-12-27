@@ -213,37 +213,52 @@ class SmartUSBHubClient:
             print(f"[Client] get_channel_current 失败: {e}")
             return None
     
-    def set_channel_low_current(self, *channels, state):
+    def set_channel_slow_charge(self, *channels):
         """
-        设置通道低电流模式
+        设置通道慢充模式（限流）
         
         Args:
             *channels: 通道编号（1-4）
-            state: 1表示启用，0表示禁用
             
         Returns:
             bool: 成功返回True，失败返回False
         """
         try:
-            return self._send_request('set_channel_low_current', args=channels, kwargs={'state': state})
+            return self._send_request('set_channel_slow_charge', args=channels)
         except Exception as e:
-            print(f"[Client] set_channel_low_current 失败: {e}")
+            print(f"[Client] set_channel_slow_charge 失败: {e}")
             return False
     
-    def get_channel_low_current_status(self, *channels):
+    def set_channel_fast_charge(self, *channels):
         """
-        获取通道低电流模式状态
+        设置通道快充模式（全功率）
         
         Args:
             *channels: 通道编号（1-4）
             
         Returns:
-            dict或None: 低电流模式状态字典，或None（如果超时）
+            bool: 成功返回True，失败返回False
         """
         try:
-            return self._send_request('get_channel_low_current_status', args=channels)
+            return self._send_request('set_channel_fast_charge', args=channels)
         except Exception as e:
-            print(f"[Client] get_channel_low_current_status 失败: {e}")
+            print(f"[Client] set_channel_fast_charge 失败: {e}")
+            return False
+    
+    def get_channel_charge_mode(self, *channels):
+        """
+        获取通道充电模式状态
+        
+        Args:
+            *channels: 通道编号（1-4）
+            
+        Returns:
+            dict或None: 充电模式状态字典（0=off, 1=fast_charge, 2=slow_charge），或None（如果超时）
+        """
+        try:
+            return self._send_request('get_channel_charge_mode', args=channels)
+        except Exception as e:
+            print(f"[Client] get_channel_charge_mode 失败: {e}")
             return None
     
     def shutdown(self):
