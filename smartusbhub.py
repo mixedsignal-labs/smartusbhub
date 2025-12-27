@@ -923,6 +923,11 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_power_flag is None:
+                self.channel_default_power_flag = {}
+            if self.channel_default_power_status is None:
+                self.channel_default_power_status = {}
             for ch in channels:
                 self.channel_default_power_flag[ch] = enable
                 self.channel_default_power_status[ch] = status
@@ -935,18 +940,28 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_power_flag is None:
+                self.channel_default_power_flag = {}
+            if self.channel_default_power_status is None:
+                self.channel_default_power_status = {}
             for ch in channels:
                 self.channel_default_power_flag[ch] = enable
                 self.channel_default_power_status[ch] = status
                 logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default power status, value: {'on' if status else 'off'}")
         else:
-            logger.error("Invalid data for _handle_set_default_power_status")
+            logger.error("Invalid data for _handle_get_default_power_status")
 
     def _handle_set_default_dataline_status(self,channel,value):
         logger.debug("_handle_set_default_dataline_status ACK")
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_dataline_flag is None:
+                self.channel_default_dataline_flag = {}
+            if self.channel_default_dataline_status is None:
+                self.channel_default_dataline_status = {}
             for ch in channels:
                 self.channel_default_dataline_flag[ch] = enable
                 self.channel_default_dataline_status[ch] = status
@@ -959,6 +974,11 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_dataline_flag is None:
+                self.channel_default_dataline_flag = {}
+            if self.channel_default_dataline_status is None:
+                self.channel_default_dataline_status = {}
             for ch in channels:
                 self.channel_default_dataline_flag[ch] = enable
                 self.channel_default_dataline_status[ch] = status
