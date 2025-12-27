@@ -307,7 +307,7 @@ ch.setFormatter(console_formatter)
 logger.addHandler(ch)
 
 # Set this flag to False to disable synchronization locking for testing purposes
-ENABLE_SYNC_LOCK = False
+ENABLE_SYNC_LOCK = True
 # Synchronization decorator for thread-safe serial command methods
 def synchronized(method):
     """Decorator to optionally serialize access to SmartUSBHub methods.
