@@ -77,7 +77,7 @@ partition "后台数据接收 (_uart_recv_task)" #FFF3E0 {
 
 stop
 
-note bottom
+note right
 **关键区别:**
 1. SET 方法使用 _wait_for_ack_with_recovery，包含错误恢复机制
 2. GET 方法先清除事件再发送，确保等待新的 ACK
