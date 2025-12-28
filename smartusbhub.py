@@ -284,6 +284,7 @@ CMD_SET_CHANNEL_SLOW_CHARGE         = 0x13
 CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
 CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
+CMD_REBOOT_MCU                      = 0xF7
 CMD_FACTORY_RESET                   = 0xFC   
 CMD_GET_FIRMWARE_VERSION            = 0xFD
 CMD_GET_HARDWARE_VERSION            = 0xFE
@@ -515,6 +516,7 @@ class SmartUSBHub:
             CMD_GET_AUTO_RESTORE_STATUS: threading.Event(),
             CMD_SET_DEVICE_ADDRESS: threading.Event(),
             CMD_GET_DEVICE_ADDRESS: threading.Event(),
+            CMD_REBOOT_MCU: threading.Event(),
             CMD_FACTORY_RESET:threading.Event(),
             CMD_GET_FIRMWARE_VERSION: threading.Event(),
             CMD_GET_HARDWARE_VERSION: threading.Event(),
@@ -876,6 +878,8 @@ class SmartUSBHub:
                                 self._handle_set_device_address()
                             elif cmd == CMD_GET_DEVICE_ADDRESS:
                                 self._handle_get_device_address(channel,value)#msb lsb
+                            elif cmd == CMD_REBOOT_MCU:
+                                self._handle_reboot_mcu()
                             elif cmd == CMD_FACTORY_RESET:
                                 self._handle_factory_reset()
                             elif cmd == CMD_GET_FIRMWARE_VERSION:
@@ -890,12 +894,31 @@ class SmartUSBHub:
                         else:
                             buffer.pop(0)
             except (OSError, AttributeError,serial.SerialException) as e:
-                logger.error(f"Error reading from UART: {e}")
+                # 检查是否是预期的断开（设备重启等）
+                # errno 6 = ENXIO (Device not configured) 通常表示设备已断开
+                # 如果 stop_event 已经设置，说明是主动断开，不应该记录为错误
+                is_expected_disconnect = False
+                if isinstance(e, OSError) and hasattr(e, 'errno'):
+                    # errno 6 (ENXIO) 通常表示设备已断开，这在设备重启时是预期的
+                    if e.errno == 6:  # Device not configured
+                        is_expected_disconnect = True
+                
+                # 如果 stop_event 已经设置，说明是主动断开（disconnect() 被调用）
+                if self.stop_event.is_set():
+                    is_expected_disconnect = True
+                
+                if is_expected_disconnect:
+                    logger.debug(f"UART disconnected (expected): {e}")
+                else:
+                    logger.error(f"Error reading from UART: {e}")
+                
                 self.ser = None
                 if self.disconnect_callback:
                     self.disconnect_callback()
                 self.stop_event.set()
-                logger.error("UART disconnected")
+                
+                if not is_expected_disconnect:
+                    logger.error("UART disconnected")
                 break
             time.sleep(0.01)
 
@@ -1239,6 +1262,10 @@ class SmartUSBHub:
         logger.debug("_handle_get_device_address ACK")
         self.device_address = (msb << 8) | lsb
         logger.debug(f"set device address: {self.device_address}")
+    
+    def _handle_reboot_mcu(self):
+        logger.debug("_handle_reboot_mcu ACK")
+
     def _handle_factory_reset(self):
         logger.debug("_handle_factory_reset ACK")
 
@@ -2050,6 +2077,40 @@ class SmartUSBHub:
         else:
             logger.error("get_device_address No ACK!")
             return None
+
+    @synchronized
+    def reboot_mcu(self):
+        """
+        Sends a command to reboot the MCU.
+        
+        Note: After sending the reboot command, the MCU will reboot in approximately 100ms.
+        The connection will be lost after reboot. You may need to reconnect after the device
+        restarts.
+    
+        Returns:
+            bool: True if the reboot command was acknowledged; False otherwise.
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_REBOOT_MCU]
+        ack_event.clear()
+        # 等待一小段时间，让可能的残留ACK到达
+        time.sleep(0.001)
+        # 如果已经有残留ACK，直接返回成功
+        if ack_event.is_set():
+            ack_event.clear()
+            logger.debug("reboot_mcu ACK (residual)")
+            return True
+        
+        # 发送命令
+        self._send_packet(CMD_REBOOT_MCU, None, None)
+        # 等待ACK，使用更长的超时时间（200ms），因为MCU会在发送ACK后延迟100ms才重启
+        # 这样可以确保有足够时间接收ACK
+        if ack_event.wait(0.2):  # 200ms 超时
+            logger.debug("reboot_mcu ACK")
+            return True
+        else:
+            logger.error("reboot_mcu No ACK!")
+            return False
 
     @synchronized
     def factory_reset(self):
