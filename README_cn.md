@@ -276,21 +276,27 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
 >
 > **注意**: 通道充电模式API仅适用于 **SmartUSBHub Pro 3.0** 型号。
 
-#### `set_channel_slow_charge(*channels, disconnect_before_switch=True)`
+
+
+#### 保持连接不充电
+
+#### `set_channel_slow_charge(*channels, disconnect_before_switch=False)`
 
 - **描述**: 设置指定通道为慢充模式。慢充模式限制充电电流（启用电流限制）。
 
 - **参数**:
   - `*channels` (int): 要设置的通道，可变参数形式，范围 1~4。
   
-  - `disconnect_before_switch` (bool): 如果为 `True`，在切换到慢充模式前会先断开通道连接3秒。默认为 `True`。
+  - `disconnect_before_switch` (bool): 如果为 `True`，在切换到慢充模式前会先断开通道连接3秒。默认为 `False`。
   
     > [!NOTE]
     >
     > 不同设备（DUT）的充电策略可能不同。为了让设备重新识别充电器能力，此参数可通过模拟数据线插拔来实现。
     >
     > 部分设备可能不需要此操作，请根据实际测试情况决定是否需要先断开通道连接再切换充电模式。
-  
+    >
+    > *一般来说，从慢充切换到快充模式需要断开一下，从快充切换到慢充不需要断开。*
+    
     
   
 - **返回值**:
@@ -308,15 +314,19 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
 
 - **流程图**:
 
-- ![set_channel_slow_charge 流程图](https://github.com/MrzhangF1ghter/smartusbhub/blob/main/assets/set_channel_slow_charge_flowchart.png?raw=true)
+- ![set_channel_slow_charge 流程图](https://raw.githubusercontent.com/mixedsignal-labs/smartusbhub/refs/heads/develop/document/chart/svg/set_channel_slow_charge_flowchart.svg?raw=true)
 
 
+
+#### 全速充电
 
 #### `set_channel_fast_charge(*channels, disconnect_before_switch=True)`
 
 - **描述**: 设置指定通道为快充模式。快充模式提供全功率充电（禁用电流限制，启用VBUS）。
+
 - **参数**:
   - `*channels` (int): 要设置的通道，可变参数形式，范围 1~4。
+  
   - `disconnect_before_switch` (bool): 如果为 `True`，在切换到慢充模式前会先断开通道连接3秒。默认为 `True`。
   
     > [!NOTE]
@@ -326,9 +336,14 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
     > 不同设备（DUT）的充电策略可能不同。为了让设备重新识别充电器能力，此参数可通过模拟数据线插拔来实现。
     >
     > 部分设备可能不需要此操作，请根据实际测试情况决定是否需要先断开通道连接再切换充电模式。
+    >
+    > 一般来说，从慢充切换到快充模式需要断开一下，从快充切换到慢充不需要断开。
+    
+    
   
 - **返回值**:
   - `bool`: 如果命令设置成功返回 `True`，否则返回 `False`。
+  
 - **示例**:
   ```python
   # 先断开连接再切换到快充模式（默认行为）
@@ -339,7 +354,7 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
   ```
 
 - **流程图**:
-  ![set_channel_fast_charge 流程图](https://github.com/MrzhangF1ghter/smartusbhub/blob/main/assets/set_channel_fast_charge_flowchart.png?raw=true)
+  ![set_channel_fast_charge 流程图](https://raw.githubusercontent.com/mixedsignal-labs/smartusbhub/refs/heads/develop/document/chart/svg/set_channel_fast_charge_flowchart.svg?raw=true)
 
 
 
