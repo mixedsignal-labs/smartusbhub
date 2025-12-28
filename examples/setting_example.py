@@ -26,6 +26,13 @@ def main():
     device_info = hub.get_device_info()
     print("device info:", device_info)
     
+    # 获取并显示硬件和固件版本
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    print()
+    
     print("Starting setting example...")
 
     default_power_status = hub.get_default_power_status(1,2,3,4)

@@ -692,9 +692,9 @@ class SmartUSBHub:
                     continue
 
         if device_address is not None:
-            logger.error(f"No Smart USB Hub found with address {device_address:#04x}, or all devices are already connected.")
+            logger.warning(f"No Smart USB Hub found with address {device_address:#04x}, or all devices are already connected.")
         else:
-            logger.error("No Smart USB Hub found, or all devices are already connected.")
+            logger.warning("No Smart USB Hub found, or all devices are already connected.")
         return None
     
     @classmethod
@@ -1631,7 +1631,7 @@ class SmartUSBHub:
             return None
 
     @synchronized
-    def set_channel_slow_charge(self, *channels, disconnect_before_switch=True):
+    def set_channel_slow_charge(self, *channels, disconnect_before_switch=False):
         """
         Enables slow charge mode for one or more channels.
         Slow charge mode limits the charging current (enables ilim).
@@ -1642,7 +1642,7 @@ class SmartUSBHub:
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
             disconnect_before_switch (bool): If True, disconnect channels for 3 seconds before enabling slow charge.
-                                             Default is True.
+                                             Default is False.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.

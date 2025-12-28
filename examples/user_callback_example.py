@@ -26,6 +26,16 @@ def main():
         print("No SmartUSBHub found")
         sys.exit(1)
 
+    device_info = hub.get_device_info()
+    print("device info:", device_info)
+    
+    # 获取并显示硬件和固件版本
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    print()
+
     #register a callback function to handle the button press event
     hub.register_callback(CMD_GET_CHANNEL_POWER_STATUS, button_press_callback)
     while True:

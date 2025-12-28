@@ -2,7 +2,14 @@
 """
 定时切换充电模式Demo
 
-每4秒在快充和慢充模式之间切换一次。
+在快充和慢充模式之间定时切换。
+切换时间可以通过命令行参数设置（默认4秒）。
+
+使用方法:
+    python charge_mode_toggle_demo.py              # 使用默认4秒切换间隔
+    python charge_mode_toggle_demo.py 2            # 每2秒切换一次
+    python charge_mode_toggle_demo.py 10           # 每10秒切换一次
+
 按 Ctrl+C 退出程序。
 """
 
@@ -11,6 +18,7 @@ import os
 import time
 import signal
 import logging
+import argparse
 
 # 添加项目根目录到路径，以便导入smartusbhub模块
 # 这样可以从任何目录运行脚本
@@ -65,6 +73,31 @@ def signal_handler(sig, frame):
 def main():
     global hub, running
     
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description='定时切换充电模式Demo',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  %(prog)s              # 使用默认4秒切换间隔
+  %(prog)s 2            # 每2秒切换一次
+  %(prog)s 10           # 每10秒切换一次
+        """
+    )
+    parser.add_argument(
+        'interval',
+        type=float,
+        nargs='?',
+        default=4.0,
+        help='切换间隔时间（秒），默认4秒'
+    )
+    args = parser.parse_args()
+    
+    toggle_interval = args.interval
+    if toggle_interval <= 0:
+        print("错误: 切换间隔必须大于0")
+        sys.exit(1)
+    
     # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)
     
@@ -80,7 +113,7 @@ def main():
     print("=" * 60)
     print("定时切换充电模式Demo")
     print("=" * 60)
-    print("每4秒在快充和慢充模式之间切换一次")
+    print(f"每{toggle_interval}秒在快充和慢充模式之间切换一次")
     print("按 Ctrl+C 退出程序")
     print("=" * 60)
     print()
@@ -98,10 +131,14 @@ def main():
     
     # 获取设备信息
     device_info = hub.get_device_info()
-    if device_info:
-        print(f"硬件版本: V1.{device_info.get('hardware_version', 'N/A')}")
-        print(f"固件版本: V1.{device_info.get('firmware_version', 'N/A')}")
-        print()
+    print("device info:", device_info)
+    
+    # 获取并显示硬件和固件版本
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    print()
     
     # 初始化：设置为快充模式
     current_mode = "FAST_CHARGE"
@@ -134,7 +171,7 @@ def main():
                     print("警告: 切换到慢充模式失败")
             else:
                 print(f"-> 切换到 FAST_CHARGE (快充模式)")
-                success = hub.set_channel_fast_charge(1, disconnect_before_switch=False)
+                success = hub.set_channel_fast_charge(1, disconnect_before_switch=True)
                 if success:
                     current_mode = "FAST_CHARGE"
                     success_count += 1
@@ -185,14 +222,23 @@ def main():
                 if no_ack_counter.no_ack_errors['other'] > 0:
                     print(f"        - 其他命令: {no_ack_counter.no_ack_errors['other']} 次")
             
-            # 等待4秒
-            print(f"等待4秒后切换...")
-            for i in range(4, 0, -1):
-                if not running:
-                    break
-                print(f"  {i}...", end='\r', flush=True)
-                time.sleep(1)
-            print("     ", end='\r')  # 清除倒计时
+            # 等待指定时间
+            print(f"等待{toggle_interval}秒后切换...")
+            if toggle_interval >= 1:
+                # 如果间隔大于等于1秒，显示倒计时
+                for i in range(int(toggle_interval), 0, -1):
+                    if not running:
+                        break
+                    print(f"  {i}...", end='\r', flush=True)
+                    time.sleep(1)
+                # 处理小数部分
+                remaining = toggle_interval - int(toggle_interval)
+                if remaining > 0 and running:
+                    time.sleep(remaining)
+                print("     ", end='\r')  # 清除倒计时
+            else:
+                # 如果间隔小于1秒，直接等待
+                time.sleep(toggle_interval)
             
     except KeyboardInterrupt:
         print("\n\n收到键盘中断，正在退出...")
