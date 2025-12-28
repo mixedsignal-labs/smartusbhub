@@ -228,9 +228,24 @@ import threading
 import signal
 import sys
 from functools import wraps
+import os
+import tempfile
+import atexit
 
 import logging
 import colorlog
+
+# 跨进程文件锁支持
+try:
+    import fcntl  # Unix/Linux/macOS
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+    try:
+        import msvcrt  # Windows
+        HAS_MSVCRT = True
+    except ImportError:
+        HAS_MSVCRT = False
 
 # Command definitions
 CMD_GET_CHANNEL_POWER_STATUS        = 0x00
@@ -285,7 +300,7 @@ OPERATE_MODE_INTERLOCK = 1
 # Configure logging
 logger = logging.getLogger(__name__)
 # log level
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.ERROR)
 
 # Create console handler with a higher log level
 ch = colorlog.StreamHandler()
@@ -337,6 +352,108 @@ class SmartUSBHub:
 
     Suitable for automated test systems and development workflows in hardware engineering environments.
     """
+    
+    # 类级别的已连接端口跟踪（用于多设备场景）
+    _connected_ports = set()
+    _connected_addresses = {}  # {port: address} 映射
+    # 跨进程文件锁字典 {port: lock_file_handle}
+    _port_locks = {}
+    _lock_dir = None  # 锁文件目录
+    
+    @classmethod
+    def _get_lock_dir(cls):
+        """获取锁文件目录"""
+        if cls._lock_dir is None:
+            # 使用临时目录存放锁文件
+            cls._lock_dir = os.path.join(tempfile.gettempdir(), 'smartusbhub_locks')
+            os.makedirs(cls._lock_dir, exist_ok=True)
+        return cls._lock_dir
+    
+    @classmethod
+    def _acquire_port_lock(cls, port):
+        """
+        获取端口的跨进程文件锁
+        
+        Args:
+            port (str): 串口名称
+            
+        Returns:
+            bool: 如果成功获取锁返回 True，否则返回 False
+        """
+        if port in cls._port_locks:
+            # 如果已经持有锁，返回 True
+            return True
+        
+        # 生成锁文件路径（将端口名中的特殊字符替换为安全字符）
+        safe_port_name = port.replace('/', '_').replace('\\', '_').replace(':', '_')
+        lock_file_path = os.path.join(cls._get_lock_dir(), f'{safe_port_name}.lock')
+        
+        try:
+            # 打开锁文件（如果不存在则创建）
+            lock_file = open(lock_file_path, 'w')
+            
+            # 尝试获取文件锁（非阻塞）
+            if HAS_FCNTL:
+                # Unix/Linux/macOS 使用 fcntl
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    cls._port_locks[port] = lock_file
+                    # 写入当前进程ID，便于调试
+                    lock_file.write(str(os.getpid()))
+                    lock_file.flush()
+                    logger.debug(f"Acquired file lock for port {port}")
+                    return True
+                except (IOError, OSError):
+                    # 锁已被其他进程持有
+                    lock_file.close()
+                    logger.warning(f"Port {port} is locked by another process")
+                    return False
+            elif HAS_MSVCRT:
+                # Windows 使用 msvcrt
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    cls._port_locks[port] = lock_file
+                    lock_file.write(str(os.getpid()))
+                    lock_file.flush()
+                    logger.debug(f"Acquired file lock for port {port}")
+                    return True
+                except IOError:
+                    lock_file.close()
+                    logger.warning(f"Port {port} is locked by another process")
+                    return False
+            else:
+                # 不支持文件锁的系统，回退到进程内检查
+                logger.warning("File locking not supported on this system, falling back to process-level check")
+                lock_file.close()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to acquire lock for port {port}: {e}")
+            return False
+    
+    @classmethod
+    def _release_port_lock(cls, port):
+        """
+        释放端口的跨进程文件锁
+        
+        Args:
+            port (str): 串口名称
+        """
+        if port not in cls._port_locks:
+            return
+        
+        lock_file = cls._port_locks.pop(port)
+        try:
+            if HAS_FCNTL:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif HAS_MSVCRT:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_file.close()
+            logger.debug(f"Released file lock for port {port}")
+        except Exception as e:
+            logger.error(f"Failed to release lock for port {port}: {e}")
+    # 跨进程文件锁字典 {port: lock_file_handle}
+    _port_locks = {}
+    _lock_dir = None  # 锁文件目录
 
     def __init__(self, port):
         """
@@ -346,7 +463,30 @@ class SmartUSBHub:
             port (str): The serial port name to connect to the device.
         """
         self.port = port
-        self.ser = serial.Serial(port, 115200,timeout = 0.5)
+        self._lock_file = None
+        self._lock_file_handle = None
+        
+        # 检查端口是否已被占用（进程内检查）
+        if port in SmartUSBHub._connected_ports:
+            raise ValueError(f"Port {port} is already in use by another SmartUSBHub instance. "
+                           f"Please disconnect the existing instance first or use a different port.")
+        
+        # 获取跨进程文件锁
+        if not self._acquire_port_lock(port):
+            raise ValueError(f"Port {port} is already in use by another process. "
+                           f"Please disconnect the existing connection first or use a different port.")
+        
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0.5)
+            # 记录已连接的端口（只有在成功打开串口后才记录）
+            SmartUSBHub._connected_ports.add(port)
+        except serial.SerialException as e:
+            # 如果打开串口失败，释放文件锁
+            self._release_port_lock(port)
+            if "could not open port" in str(e).lower() or "access is denied" in str(e).lower():
+                raise ValueError(f"Port {port} is already in use. Please disconnect the existing connection first.")
+            raise
+        
         self.com_timeout = 0.1
         logger.info(f"SmartUSBHub initialized on port {self.port}")
 
@@ -429,7 +569,21 @@ class SmartUSBHub:
         
         if self.operate_mode is None:
             logger.error("Failed to get operate mode.")
+            # 清理已连接端口记录和串口
+            if self.port in SmartUSBHub._connected_ports:
+                SmartUSBHub._connected_ports.discard(self.port)
+            if self.port in SmartUSBHub._connected_addresses:
+                del SmartUSBHub._connected_addresses[self.port]
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except:
+                    pass
             sys.exit(1)
+        
+        # 记录设备地址
+        if self.device_address is not None:
+            SmartUSBHub._connected_addresses[port] = self.device_address
             
         logger.info(f"Hardware version: V1.{self.hardware_version}")
         logger.info(f"Firmware version: V1.{self.firmware_version}")
@@ -490,24 +644,72 @@ class SmartUSBHub:
         return port_list
     
     @classmethod
-    def scan_and_connect(cls):
+    def scan_and_connect(cls, exclude_ports=None, device_address=None):
         """
         Searches for available Smart USB Hub devices and connects to the first valid one.
+        
+        Args:
+            exclude_ports (set, optional): 要排除的端口集合（已连接的端口）。如果为None，自动排除已连接的端口。
+            device_address (int, optional): 要连接的设备地址。如果指定，会尝试连接所有未连接的设备，直到找到匹配地址的设备。
+                                            **注意**: 由于设备地址默认为0，多个设备可能地址相同，建议使用端口号来区分设备。
 
         Returns:
             SmartUSBHub or None: An instance of SmartUSBHub if found, otherwise None.
         """
+        if exclude_ports is None:
+            exclude_ports = cls._connected_ports.copy()
+        
         for port_info in serial.tools.list_ports.comports():
             port_name = port_info.device
+            
+            # 跳过已连接的端口
+            if port_name in exclude_ports:
+                logger.debug(f"Skipping already connected port {port_name}")
+                continue
+            
             logger.debug(f"Trying to connect to port {port_name}")
             if port_info.vid == 0x1A86 and port_info.pid == 0xfe0c:
-                hub = cls(port_name)
-                port_suffix = port_name.split("/")[-1]
-                hub.name = f"smarthub_id:{port_suffix}"
-                return hub
+                try:
+                    hub = cls(port_name)
+                    port_suffix = port_name.split("/")[-1]
+                    hub.name = f"smarthub_id:{port_suffix}"
+                    
+                    # 如果指定了设备地址，检查是否匹配
+                    # 注意：设备地址默认为0，多个设备可能地址相同，所以此方法可能不够准确
+                    if device_address is not None:
+                        if hub.device_address != device_address:
+                            logger.debug(f"Device address mismatch on port {port_name}: expected {device_address:#04x}, got {hub.device_address:#04x}")
+                            hub.disconnect()
+                            continue
+                        else:
+                            logger.info(f"Found device with address {device_address:#04x} on port {port_name}")
+                    
+                    return hub
+                except (ValueError, serial.SerialException) as e:
+                    logger.warning(f"Failed to connect to {port_name}: {e}")
+                    continue
 
-        logger.error("No Smart USB Hub found.")
+        if device_address is not None:
+            logger.error(f"No Smart USB Hub found with address {device_address:#04x}, or all devices are already connected.")
+        else:
+            logger.error("No Smart USB Hub found, or all devices are already connected.")
         return None
+    
+    @classmethod
+    def scan_and_connect_by_address(cls, device_address):
+        """
+        通过设备地址连接指定的Smart USB Hub设备。
+        
+        **警告**: 由于设备地址默认为0，多个设备可能地址相同，此方法可能不够准确。
+        建议使用 `scan_and_connect()` 并通过端口号来区分设备，或者先为每个设备设置不同的地址。
+        
+        Args:
+            device_address (int): 要连接的设备地址（0x0000 - 0xFFFF）。
+        
+        Returns:
+            SmartUSBHub or None: 如果找到匹配地址的设备则返回实例，否则返回None。
+        """
+        return cls.scan_and_connect(device_address=device_address)
     
     def _start(self):
         """
@@ -523,10 +725,20 @@ class SmartUSBHub:
         Disconnects from the device and stops the UART receive thread.
         """
         self.stop_event.set()
-        self.uart_recv_thread.join(timeout=1)
+        if hasattr(self, 'uart_recv_thread'):
+            self.uart_recv_thread.join(timeout=1)
         if self.ser and self.ser.is_open:
             self.ser.flush()
             self.ser.close()
+        
+        # 从已连接端口列表中移除
+        if self.port in SmartUSBHub._connected_ports:
+            SmartUSBHub._connected_ports.discard(self.port)
+        if self.port in SmartUSBHub._connected_addresses:
+            del SmartUSBHub._connected_addresses[self.port]
+        
+        # 释放跨进程文件锁
+        self._release_port_lock(self.port)
     def is_connected(self):
         """
         Check if the device's serial port is connected and open.
@@ -792,7 +1004,24 @@ class SmartUSBHub:
         if not ack_event:
             return False
         
+        # 先检查事件是否已经设置（ACK可能已经到达）
+        if ack_event.is_set():
+            # ACK已经到达，清除事件并返回成功
+            ack_event.clear()
+            self._consecutive_failures = 0
+            return True
+        
+        # 清除事件，准备等待新的ACK
         ack_event.clear()
+        # 再次检查（防止在clear()之后立即到达的ACK）
+        time.sleep(0.001)  # 极短延迟，让可能的残留ACK到达
+        if ack_event.is_set():
+            # 残留ACK到达，清除并返回成功
+            ack_event.clear()
+            self._consecutive_failures = 0
+            return True
+        
+        # 等待新的ACK
         success = ack_event.wait(timeout)
         
         if success:
@@ -847,6 +1076,8 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_power_status[ch] = value
             logger.info(f"CMD_GET_CHANNEL_POWER_STATUS acked: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_POWER_STATUS].set()
 
     def _handle_power_interlock_control(self):
         logger.debug("_handle_power_interlock_control ACK")
@@ -906,12 +1137,16 @@ class SmartUSBHub:
         channels = self._convert_channel(channel)
         for ch in channels:
             logger.debug(f"Set Channel Slow Charge: ch{ch} = enabled")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE].set()
 
     def _handle_set_channel_fast_charge(self, channel, value):
         logger.debug("_handle_set_channel_fast_charge ACK")
         channels = self._convert_channel(channel)
         for ch in channels:
             logger.debug(f"Set Channel Fast Charge: ch{ch} = enabled")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE].set()
 
     def _handle_get_channel_charge_mode(self, channel, value):
         logger.debug("_handle_get_channel_charge_mode ACK")
@@ -920,6 +1155,8 @@ class SmartUSBHub:
             self.channel_charge_modes[ch] = value
             mode_str = "off" if value == 0 else ("fast_charge" if value == 1 else "slow_charge")
             logger.debug(f"Get Channel Charge Mode: ch{ch} = {mode_str} ({value})")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE].set()
 
     def _handle_get_button_control(self, value):
         logger.debug("_handle_get_button_control ACK")
@@ -1156,7 +1393,17 @@ class SmartUSBHub:
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER]
+        ack_event.clear()
+        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
+        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
+        if ack_event.is_set():
+            logger.debug("Found residual ACK after clear, clearing again...")
+            ack_event.clear()
+        # 然后发送命令
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
+        # 等待ACK（_wait_for_ack_with_recovery 内部会再次clear，但由于我们已经clear过了，这不会造成问题）
         if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
             logger.debug("set_channel_power ACK")
             return True
@@ -1351,20 +1598,136 @@ class SmartUSBHub:
             return None
 
     @synchronized
-    def set_channel_slow_charge(self, *channels):
+    def set_channel_slow_charge(self, *channels, disconnect_before_switch=True):
         """
         Enables slow charge mode for one or more channels.
         Slow charge mode limits the charging current (enables ilim).
+        
+        **重要**: 慢充模式保持连接的条件是之前电源必须是打开状态。如果通道之前是关闭状态，
+        会先切换到快充模式3秒，然后再切换到慢充模式，以确保数据连接不断开。
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
+            disconnect_before_switch (bool): If True, disconnect channels for 3 seconds before enabling slow charge.
+                                             Default is True.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
+
+        set_channel_slow_charge(channels)
+        ↓
+        获取当前电源状态
+        ↓
+        ┌─────────────────┬─────────────────┐
+        │  关闭状态         │   已打开状态     │
+        │  (power=0)      │  (power=1)      │
+        ├─────────────────┼─────────────────┤
+        │ 1. 打开电源       │ 1. 如果disconnect│
+        │ 2. 设置为快充     │    =True，断开3秒│
+        │ 3. 等待3秒       │                 │
+        │ 4. 切换到慢充     │ 2. 切换到慢充   │
+        └─────────────────┴─────────────────┘
+
         """
-        self._send_packet(CMD_SET_CHANNEL_SLOW_CHARGE, channels, 1)
+        channels_list = list(channels)
+        
+        # 先获取当前状态（直接发送命令，避免调用@synchronized方法导致死锁）
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
+        ack_event.clear()
+        # 然后发送命令
+        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, tuple(channels_list))
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_channel_power_status ACK")
+            power_status_dict = {}
+            for ch in channels_list:
+                status = self.channel_power_status.get(ch, 0)
+                power_status_dict[ch] = status
+            logger.debug(f"Power status retrieved: {power_status_dict}")
+        else:
+            logger.warning(f"Failed to get power status within {self.com_timeout}s timeout. "
+                         f"Will try to read cached status or assume channels are off.")
+            # 尝试使用缓存的状态（如果之前查询过）
+            power_status_dict = {}
+            for ch in channels_list:
+                # 优先使用缓存的状态，如果没有则假设为关闭
+                cached_status = self.channel_power_status.get(ch)
+                if cached_status is not None:
+                    power_status_dict[ch] = cached_status
+                    logger.debug(f"Using cached power status for channel {ch}: {cached_status}")
+                else:
+                    power_status_dict[ch] = 0
+                    logger.warning(f"No cached status for channel {ch}, assuming it's off")
+        
+        # 检查每个通道的当前状态
+        need_fast_charge_first = []
+        channels_already_on = []
+        
+        for channel in channels_list:
+            # 检查电源状态
+            power_status = power_status_dict.get(channel, 0)
+            
+            # 如果电源是关闭状态，需要先切换到快充模式
+            if power_status == 0:
+                need_fast_charge_first.append(channel)
+                logger.debug(f"Channel {channel} is currently off, will enable fast charge first")
+            else:
+                channels_already_on.append(channel)
+                logger.debug(f"Channel {channel} is already on")
+        
+        # 如果有通道需要先切换到快充模式（从关闭状态）
+        if need_fast_charge_first:
+            logger.debug(f"Channels {need_fast_charge_first} are off, enabling fast charge mode first for 3 seconds")
+            # 先打开电源并设置为快充模式 (先建立数据连接)
+            self._send_packet(CMD_SET_CHANNEL_POWER, tuple(need_fast_charge_first), 1)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                # 等待电源稳定
+                time.sleep(0.1)
+                # 设置为快充模式
+                self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, tuple(need_fast_charge_first), 1)
+                if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_FAST_CHARGE):
+                    logger.debug(f"Fast charge enabled for channels {need_fast_charge_first}, waiting 3 seconds")
+                    time.sleep(3.0)
+                else:
+                    logger.warning(f"Failed to enable fast charge for channels {need_fast_charge_first}. "
+                                 f"Power is on but fast charge mode failed. Will continue to slow charge mode.")
+                    # 即使快充模式设置失败，电源已经打开，仍然可以尝试切换到慢充模式
+                    # 但可能无法保证数据连接不断开
+            else:
+                logger.warning(f"Failed to power on channels {need_fast_charge_first}. "
+                             f"Cannot proceed to slow charge mode.")
+                # 如果电源打开失败，无法继续执行慢充模式切换
+                return False
+        
+        # 如果需要断开连接再切换（对于已经是打开状态的通道：快充或慢充）
+        if disconnect_before_switch and channels_already_on:
+            logger.debug(f"Disconnecting channels {channels_already_on} before setting slow charge mode")
+            self._send_packet(CMD_SET_CHANNEL_POWER, tuple(channels_already_on), 0)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                time.sleep(3.0)
+            else:
+                logger.warning("Failed to disconnect channels before slow charge")
+
+        # 切换到慢充模式
+        # 检查上一个相关命令是否完成（避免在设备还在处理时发送新命令）
+        # 检查快充命令是否完成，如果未完成则等待
+        fast_charge_event = self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE]
+        if not fast_charge_event.is_set():
+            logger.debug("Previous fast charge command not completed, waiting...")
+            # 等待上一个命令完成，最多等待3秒（因为断开操作需要3秒）
+            if not fast_charge_event.wait(3.1):
+                logger.warning("Previous fast charge command timeout, proceeding anyway...")
+        
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE]
         ack_event.clear()
+        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
+        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
+        if ack_event.is_set():
+            logger.debug("Found residual ACK after clear, clearing again...")
+            ack_event.clear()
+        # 然后发送命令
+        self._send_packet(CMD_SET_CHANNEL_SLOW_CHARGE, channels, 1)
         if ack_event.wait(self.com_timeout):
             logger.debug("set_channel_slow_charge ACK")
             return True
@@ -1373,20 +1736,46 @@ class SmartUSBHub:
             return False
 
     @synchronized
-    def set_channel_fast_charge(self, *channels):
+    def set_channel_fast_charge(self, *channels, disconnect_before_switch=True):
         """
         Enables fast charge mode for one or more channels.
         Fast charge mode provides full power (disables ilim, enables VBUS).
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
+            disconnect_before_switch (bool): If True, disconnect channels for 1 second before enabling fast charge.
+                                            Default is True.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
-        self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, channels, 1)
+        if disconnect_before_switch:
+            logger.debug(f"Disconnecting channels {channels} before setting fast charge mode")
+            self._send_packet(CMD_SET_CHANNEL_POWER, channels, 0)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                time.sleep(3.0)
+            else:
+                logger.warning("Failed to disconnect channels before fast charge")
+
+        # 检查上一个相关命令是否完成（避免在设备还在处理时发送新命令）
+        # 检查慢充命令是否完成，如果未完成则等待
+        slow_charge_event = self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE]
+        if not slow_charge_event.is_set():
+            logger.debug("Previous slow charge command not completed, waiting...")
+            # 等待上一个命令完成，最多等待3秒（因为断开操作需要3秒）
+            if not slow_charge_event.wait(3.1):
+                logger.warning("Previous slow charge command timeout, proceeding anyway...")
+        
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE]
         ack_event.clear()
+        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
+        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
+        if ack_event.is_set():
+            logger.debug("Found residual ACK after clear, clearing again...")
+            ack_event.clear()
+        # 然后发送命令
+        self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, channels, 1)
         if ack_event.wait(self.com_timeout):
             logger.debug("set_channel_fast_charge ACK")
             return True
@@ -1407,9 +1796,16 @@ class SmartUSBHub:
                           Charge mode values: 0=off, 1=fast_charge, 2=slow_charge.
                           Returns None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE]
         ack_event.clear()
+        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
+        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
+        if ack_event.is_set():
+            logger.debug("Found residual ACK after clear, clearing again...")
+            ack_event.clear()
+        # 然后发送命令
+        self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_charge_mode ACK")
             result = {}

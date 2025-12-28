@@ -4,9 +4,9 @@
 
 ![view1](https://github.com/MrzhangF1ghter/smartusbhub/blob/main/assets/view1.png?raw=true)
 
-**本文档适用型号**：`SmartUSBHub_V1.3a`
+**本文档适用型号**：`SmartUSBHub Pro 2.0` `SmartUSBHub Pro 3.0` 
 
-**本文档更新日期**：2025年9月24日
+**本文档更新日期**：2025年12月28日
 
 
 
@@ -270,6 +270,97 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
 
 
 
+### 控制通道充电模式
+
+> [!NOTE]
+>
+> **注意**: 通道充电模式API仅适用于 **SmartUSBHub Pro 3.0** 型号。
+
+#### `set_channel_slow_charge(*channels, disconnect_before_switch=True)`
+
+- **描述**: 设置指定通道为慢充模式。慢充模式限制充电电流（启用电流限制）。
+
+- **参数**:
+  - `*channels` (int): 要设置的通道，可变参数形式，范围 1~4。
+  
+  - `disconnect_before_switch` (bool): 如果为 `True`，在切换到慢充模式前会先断开通道连接3秒。默认为 `True`。
+  
+    > [!NOTE]
+    >
+    > 不同设备（DUT）的充电策略可能不同。为了让设备重新识别充电器能力，此参数可通过模拟数据线插拔来实现。
+    >
+    > 部分设备可能不需要此操作，请根据实际测试情况决定是否需要先断开通道连接再切换充电模式。
+  
+    
+  
+- **返回值**:
+  
+  - `bool`: 如果命令设置成功返回 `True`，否则返回 `False`。
+  
+- **示例**:
+  ```python
+  # 直接切换到慢充模式（不断开连接）
+  hub.set_channel_slow_charge(1, disconnect_before_switch=False)
+  
+  # 先断开连接再切换到慢充模式
+  hub.set_channel_slow_charge(1, disconnect_before_switch=True)
+  ```
+
+- **流程图**:
+
+- ![set_channel_slow_charge 流程图](https://github.com/MrzhangF1ghter/smartusbhub/blob/main/assets/set_channel_slow_charge_flowchart.png?raw=true)
+
+
+
+#### `set_channel_fast_charge(*channels, disconnect_before_switch=True)`
+
+- **描述**: 设置指定通道为快充模式。快充模式提供全功率充电（禁用电流限制，启用VBUS）。
+- **参数**:
+  - `*channels` (int): 要设置的通道，可变参数形式，范围 1~4。
+  - `disconnect_before_switch` (bool): 如果为 `True`，在切换到慢充模式前会先断开通道连接3秒。默认为 `True`。
+  
+    > [!NOTE]
+    >
+    > 快充模式是指 BC1.2  (5V 1.5A)
+    >
+    > 不同设备（DUT）的充电策略可能不同。为了让设备重新识别充电器能力，此参数可通过模拟数据线插拔来实现。
+    >
+    > 部分设备可能不需要此操作，请根据实际测试情况决定是否需要先断开通道连接再切换充电模式。
+  
+- **返回值**:
+  - `bool`: 如果命令设置成功返回 `True`，否则返回 `False`。
+- **示例**:
+  ```python
+  # 先断开连接再切换到快充模式（默认行为）
+  hub.set_channel_fast_charge(1)
+  
+  # 直接切换到快充模式（不断开连接）
+  hub.set_channel_fast_charge(1, disconnect_before_switch=False)
+  ```
+
+- **流程图**:
+  ![set_channel_fast_charge 流程图](https://github.com/MrzhangF1ghter/smartusbhub/blob/main/assets/set_channel_fast_charge_flowchart.png?raw=true)
+
+
+
+### 获取通道充电模式
+
+#### `get_channel_charge_mode(*channels)`
+
+- **描述**: 查询指定通道的充电模式。
+- **参数**:
+  - `*channels` (int): 要查询的通道，可变参数形式，范围 1~4。
+- **返回值**:
+  - `dict` 或 `None`: 包含通道充电模式的字典，键为通道号，值为充电模式。充电模式值：`0` 表示关闭，`1` 表示快充模式，`2` 表示慢充模式。若超时则返回 `None`。
+- **示例**:
+  ```python
+  # 查询通道1和通道2的充电模式
+  modes = hub.get_channel_charge_mode(1, 2)
+  # 返回示例: {1: 1, 2: 2}  # 通道1为快充，通道2为慢充
+  ```
+
+
+
 ### 控制通道电源互锁
 
 #### `set_channel_power_interlock(channel)`
@@ -336,6 +427,8 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
 
 ### 获取通道电压
 
+> **注意**: 此API仅适用于 **SmartUSBHub Pro 2.0** 型号。
+
 #### `get_channel_voltage(channel)`
 
 - **描述**: 查询单个通道的电压。
@@ -356,6 +449,8 @@ git clone https://github.com/MrzhangF1ghter/smartusbhub.git
 
 
 ### 获取通道电流
+
+> **注意**: 此API仅适用于 **SmartUSBHub Pro 2.0** 型号。
 
 #### `get_channel_current(channel)`
 

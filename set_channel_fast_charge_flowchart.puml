@@ -1,0 +1,49 @@
+@startuml
+title set_channel_fast_charge 流程图
+
+skinparam activity {
+    BackgroundColor #E8F5E9
+    BorderColor #4CAF50
+    FontColor #000000
+    FontSize 12
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+:set_channel_fast_charge(channels, disconnect_before_switch=True);
+note right: 快充模式切换\n默认 disconnect_before_switch=True\nBC1.2 (5V 1.5A)
+
+if (disconnect_before_switch == True?) then (是)
+  partition "断开通道" {
+    :发送断开命令\nCMD_SET_CHANNEL_POWER, channels, 0;
+    if (收到ACK?) then (是)
+      :等待3秒;
+      note right: 模拟数据线插拔\n让设备重新识别充电器能力\n(BC1.2)
+    else (否)
+      :记录警告: 断开失败;
+      note right: 继续执行后续步骤
+    endif
+  }
+else (否)
+  :跳过断开步骤;
+  note right: 直接切换到快充模式
+endif
+
+:发送快充命令\nCMD_SET_CHANNEL_FAST_CHARGE, channels, 1;
+:等待 ACK 事件;
+if (收到ACK?) then (是)
+  :记录调试日志: set_channel_fast_charge ACK;
+  :返回 True;
+  stop
+else (否)
+  :记录错误: set_channel_fast_charge No ACK!;
+  :返回 False;
+  stop
+endif
+
+@enduml
+

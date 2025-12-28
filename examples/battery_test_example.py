@@ -6,8 +6,14 @@
 # email:embeddedtec@outlook.com
 
 import sys
+import os
 import time
-sys.path.append('../')
+# 添加项目根目录到路径，以便导入smartusbhub模块
+# 这样可以从任何目录运行脚本
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 from smartusbhub import SmartUSBHub
 
 def main():
@@ -43,18 +49,18 @@ def main():
                 print("-> Switching to SLOW_CHARGE (ilim mode)")
 
                 # Enable slow charge mode (limits charging current)
-                hub.set_channel_slow_charge(1, 2, 3, 4)
+                hub.set_channel_slow_charge(1, disconnect_before_switch=False)
             else:
                 mode = "FAST_CHARGE"
                 print("-> Switching to FAST_CHARGE (full-speed charging)")
 
                 # Enable fast charge mode (full power)
-                hub.set_channel_fast_charge(1, 2, 3, 4)
+                hub.set_channel_fast_charge(1)
 
             print(f"[STATE] mode={mode}")
             
             # Get and display charge mode status
-            charge_modes = hub.get_channel_charge_mode(1, 2, 3, 4)
+            charge_modes = hub.get_channel_charge_mode(1)
             if charge_modes:
                 for ch, mode_val in charge_modes.items():
                     mode_str = "off" if mode_val == 0 else ("fast_charge" if mode_val == 1 else "slow_charge")

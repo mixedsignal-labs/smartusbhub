@@ -1,0 +1,80 @@
+@startuml
+title set_channel_slow_charge 流程图
+
+skinparam activity {
+    BackgroundColor #E1F5FF
+    BorderColor #0066CC
+    FontColor #000000
+    FontSize 12
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+:set_channel_slow_charge(channels, disconnect_before_switch=True);
+note right: 慢充模式切换\n默认 disconnect_before_switch=True
+
+:获取当前电源状态\n发送 CMD_GET_CHANNEL_POWER_STATUS;
+if (收到ACK?) then (是)
+  :读取 channel_power_status;
+else (否)
+  :假设所有通道为关闭状态;
+endif
+
+:遍历所有通道，检查电源状态;
+
+partition "状态分类" {
+  if (通道电源状态 == 0?) then (是 - 关闭状态)
+    :添加到 need_fast_charge_first 列表;
+  else (否 - 已打开状态)
+    :添加到 channels_already_on 列表;
+  endif
+}
+
+if (need_fast_charge_first 不为空?) then (是)
+  partition "从关闭状态切换到慢充" {
+    :打开电源\nCMD_SET_CHANNEL_POWER, 1;
+    if (收到ACK?) then (是)
+      :等待0.1秒电源稳定;
+      :设置为快充模式\nCMD_SET_CHANNEL_FAST_CHARGE;
+      if (收到ACK?) then (是)
+        :等待3秒;
+        note right: 确保数据连接不断开
+      else (否)
+        :记录警告: 快充模式设置失败;
+      endif
+    else (否)
+      :记录警告: 电源打开失败;
+    endif
+  }
+else (否)
+endif
+
+if (disconnect_before_switch == True\n且 channels_already_on 不为空?) then (是)
+  partition "断开已打开通道" {
+    :断开通道\nCMD_SET_CHANNEL_POWER, 0;
+    if (收到ACK?) then (是)
+      :等待3秒;
+      note right: 模拟数据线插拔\n让设备重新识别充电器能力
+    else (否)
+      :记录警告: 断开失败;
+    endif
+  }
+else (否)
+endif
+
+:切换到慢充模式\nCMD_SET_CHANNEL_SLOW_CHARGE;
+if (收到ACK?) then (是)
+  :返回 True;
+  stop
+else (否)
+  :记录错误: 慢充模式设置失败;
+  :返回 False;
+  stop
+endif
+
+@enduml
+

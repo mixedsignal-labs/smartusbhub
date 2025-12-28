@@ -1,0 +1,131 @@
+@startuml
+title scan_and_connect 流程图
+
+skinparam activity {
+    BackgroundColor #FFF3E0
+    BorderColor #FF9800
+    FontColor #000000
+    FontSize 12
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+:scan_and_connect(exclude_ports=None, device_address=None);
+note right: 扫描并连接 Smart USB Hub 设备\n支持跨进程文件锁保护
+
+if (exclude_ports == None?) then (是)
+  :从 _connected_ports 复制已连接端口列表;
+  :exclude_ports = cls._connected_ports.copy();
+else (否)
+  :使用提供的 exclude_ports;
+endif
+
+:遍历所有串口设备\nfor port_info in serial.tools.list_ports.comports();
+
+repeat
+  :获取当前端口信息 port_info;
+  :port_name = port_info.device;
+  
+  if (port_name 在 exclude_ports 中?) then (是)
+    :记录调试日志: 跳过已连接端口;
+  else (否)
+    :记录调试日志: 尝试连接端口 port_name;
+    
+    if (port_info.vid == 0x1A86\n且 port_info.pid == 0xfe0c?) then (是 - 匹配)
+      partition "尝试连接设备" {
+        :尝试创建 SmartUSBHub 实例\nhub = cls(port_name);
+        
+        partition "SmartUSBHub.__init__" {
+          :检查进程内端口占用\nif port in _connected_ports;
+          
+          if (端口已被占用?) then (是)
+            :抛出 ValueError: 端口已被占用;
+            stop
+          else (否)
+          endif
+          
+          partition "跨进程文件锁" {
+            :生成锁文件路径\nsafe_port_name.lock;
+            :打开锁文件;
+            
+            if (系统支持 fcntl?) then (是 - Unix/Linux/macOS)
+              :尝试获取文件锁\nfcntl.flock(LOCK_EX | LOCK_NB);
+            else (否)
+              if (系统支持 msvcrt?) then (是 - Windows)
+                :尝试获取文件锁\nmsvcrt.locking(LK_NBLCK);
+              else (否)
+                :回退到进程内检查;
+              endif
+            endif
+            
+            if (获取锁成功?) then (是)
+              :写入进程ID到锁文件;
+              :保存锁文件句柄到 _port_locks;
+            else (否)
+              :关闭锁文件;
+              :抛出 ValueError: 端口被其他进程占用;
+              stop
+            endif
+          }
+          
+          :打开串口\nserial.Serial(port, 115200);
+          
+          if (打开成功?) then (是)
+            :添加到 _connected_ports;
+            :初始化设备信息;
+          else (否)
+            :释放文件锁;
+            :抛出 SerialException;
+            stop
+          endif
+        }
+        
+        if (创建成功?) then (是)
+          :设置 hub.name = f"smarthub_id:{port_suffix}";
+          
+          if (device_address != None?) then (是 - 指定了地址)
+            partition "检查设备地址" {
+              if (hub.device_address == device_address?) then (是 - 匹配)
+                :记录信息: 找到匹配地址的设备;
+                :返回 hub 实例;
+                stop
+              else (否 - 不匹配)
+                :记录调试日志: 设备地址不匹配;
+                :hub.disconnect();
+                note right: disconnect() 会释放文件锁
+              endif
+            }
+          else (否 - 未指定地址)
+            :直接返回 hub 实例;
+            stop
+          endif
+        else (否 - 创建失败)
+          :捕获异常 (ValueError, SerialException);
+          :记录警告: 连接失败;
+        endif
+      }
+    else (否 - VID/PID 不匹配)
+      :继续下一个端口;
+    endif
+  endif
+  
+repeat while (还有更多端口?) is (是)
+->否;
+
+:所有端口遍历完毕;
+
+if (device_address != None?) then (是)
+  :记录错误: 未找到指定地址的设备;
+else (否)
+  :记录错误: 未找到设备或所有设备已连接;
+endif
+
+:返回 None;
+stop
+
+@enduml
+
