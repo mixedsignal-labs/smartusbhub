@@ -95,7 +95,7 @@ def get_device_and_local_channel(global_channel, channels_per_device=4):
     local_channel = global_channel % channels_per_device + 1
     return device_index, local_channel
 
-def set_channel_power_and_verify(hub, channel, state, verify_delay=0.1, max_retries=2):
+def set_channel_power_and_verify(hub, channel, state):
     """
     设置通道电源状态并验证是否真的执行成功
     
@@ -103,36 +103,20 @@ def set_channel_power_and_verify(hub, channel, state, verify_delay=0.1, max_retr
         hub: SmartUSBHub实例
         channel (int): 通道号（1-4）
         state (int): 状态（0=关闭, 1=打开）
-        verify_delay (float): 验证前的等待时间（秒）
-        max_retries (int): 验证失败时的最大重试次数
     
     Returns:
         tuple: (设置成功, 验证成功) - 两个布尔值
     """
-    # 执行设置命令
+    # 执行设置命令（已经等待ACK，状态应该已经切换完成）
     set_success = hub.set_channel_power(channel, state=state)
     if not set_success:
         return (False, False)  # 设置失败
     
-    # 等待状态稳定
-    time.sleep(verify_delay)
-    
-    # 验证状态（带重试）
+    # 直接验证状态（不需要额外延迟，因为set_channel_power已经等待了ACK）
     verify_success = False
-    for retry in range(max_retries + 1):
-        actual_state = hub.get_channel_power_status(channel)
-        if actual_state is not None:
-            # 检查状态是否匹配
-            if actual_state == state:
-                verify_success = True
-                break
-            # 如果状态不匹配，等待一下再重试
-            if retry < max_retries:
-                time.sleep(verify_delay)
-        else:
-            # 获取状态超时，等待一下再重试
-            if retry < max_retries:
-                time.sleep(verify_delay)
+    actual_state = hub.get_channel_power_status(channel)
+    if actual_state is not None and actual_state == state:
+        verify_success = True
     
     return (True, verify_success)  # 设置成功，验证可能成功或失败
 

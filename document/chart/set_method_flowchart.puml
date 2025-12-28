@@ -1,0 +1,77 @@
+@startuml
+title SET 方法通用流程图
+
+skinparam activity {
+    BackgroundColor #E1F5FF
+    BorderColor #0066CC
+    FontColor #000000
+    FontSize 12
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+:调用 SET 方法\n例如: set_channel_power(channels, state);
+note right: 所有 SET 方法都遵循\n相同的执行流程
+
+:发送命令\n_send_packet(CMD_XXX, ...);
+note right: 命令通过串口发送到 MCU\n包含命令码、通道、数据等
+
+:调用 _wait_for_ack_with_recovery(CMD_XXX);
+note right: 统一的 ACK 等待机制\n包含错误恢复功能
+
+partition "_wait_for_ack_with_recovery 内部流程" {
+    :获取 ack_event;
+    if (ack_event.is_set()?) then (是 - ACK已到达)
+        :清除事件;
+        :重置失败计数;
+        :返回 True;
+        stop
+    else (否)
+    endif
+    
+    :清除事件\nack_event.clear();
+    :等待 0.001 秒;
+    note right: 极短延迟，让可能的\n残留 ACK 到达
+    
+    if (ack_event.is_set()?) then (是 - 残留ACK)
+        :清除事件;
+        :重置失败计数;
+        :返回 True;
+        stop
+    else (否)
+    endif
+    
+    :等待新的 ACK\nack_event.wait(timeout);
+    note right: 等待 MCU 返回 ACK\n超时时间: com_timeout (默认 0.1秒)
+    
+    if (收到 ACK?) then (是)
+        :重置失败计数;
+        :返回 True;
+    else (否 - 超时)
+        :增加失败计数;
+        if (连续失败次数 >= 5?) then (是)
+            :触发 MCU 状态机恢复\n_trigger_mcu_recovery();
+            note right: 等待 150ms 让 MCU 恢复\n清空串口缓冲区
+            :重置失败计数;
+        else (否)
+        endif
+        :返回 False;
+    endif
+}
+
+if (ACK 成功?) then (是)
+    :记录调试日志\n"set_xxx ACK";
+    :返回 True;
+    stop
+else (否)
+    :记录错误日志\n"set_xxx No ACK!";
+    :返回 False;
+    stop
+endif
+
+@enduml
+

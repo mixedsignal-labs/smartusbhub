@@ -1,0 +1,88 @@
+@startuml
+title SET 和 GET 方法对比流程图
+
+skinparam activity {
+    BackgroundColor #F5F5F5
+    BorderColor #333333
+    FontColor #000000
+    FontSize 11
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+
+partition "SET 方法流程 (设置命令)" #E1F5FF {
+    :调用 SET 方法\nset_xxx(...);
+    :发送命令\n_send_packet(CMD_SET_XXX, ...);
+    :调用 _wait_for_ack_with_recovery();
+    
+    partition "_wait_for_ack_with_recovery" {
+        if (ACK已到达?) then (是)
+            :清除并返回成功;
+        else (否)
+            :清除事件;
+            :等待 0.001秒;
+            if (残留ACK?) then (是)
+                :清除并返回成功;
+            else (否)
+                :等待新ACK;
+                if (收到ACK?) then (是)
+                    :返回成功;
+                else (否)
+                    :失败计数++;
+                    if (连续失败>=5?) then (是)
+                        :触发MCU恢复;
+                    endif
+                    :返回失败;
+                endif
+            endif
+        endif
+    }
+    
+    if (成功?) then (是)
+        :返回 True;
+    else (否)
+        :返回 False;
+    endif
+}
+
+partition "GET 方法流程 (查询命令)" #E8F5E9 {
+    :调用 GET 方法\nget_xxx(...);
+    :获取 ack_event;
+    :清除事件\nack_event.clear();
+    :发送命令\n_send_packet(CMD_GET_XXX, ...);
+    :等待 ACK\nack_event.wait(timeout);
+    
+    if (收到ACK?) then (是)
+        :从缓存字典读取数据;
+        :返回数据;
+    else (否)
+        :返回 None;
+    endif
+}
+
+partition "后台数据接收 (_uart_recv_task)" #FFF3E0 {
+    :持续监听串口;
+    :接收数据包;
+    :解析协议帧;
+    :调用对应的 _handle_xxx();
+    :更新缓存字典;
+    :设置 ack_event;
+    note right: 后台线程持续运行\n接收 MCU 返回的数据\n并更新到缓存字典
+}
+
+stop
+
+note bottom
+**关键区别:**
+1. SET 方法使用 _wait_for_ack_with_recovery，包含错误恢复机制
+2. GET 方法先清除事件再发送，确保等待新的 ACK
+3. 数据由后台线程接收并更新到缓存字典，GET 方法从缓存读取
+end note
+
+@enduml
+

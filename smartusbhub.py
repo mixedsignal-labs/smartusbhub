@@ -1369,8 +1369,13 @@ class SmartUSBHub:
         Returns:
             bool: True if the device responds in the expected mode, otherwise False.
         """
-        command = self._send_packet(CMD_GET_OPERATE_MODE, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_OPERATE_MODE):  
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_OPERATE_MODE]
+        ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_OPERATE_MODE, None, None)
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):  
             logger.debug("get_operate_mode ACK")
             logger.debug(f"operate_mode: {self.operate_mode}")
             if self.operate_mode is None:
@@ -1393,17 +1398,9 @@ class SmartUSBHub:
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
-        # 先清除事件，避免之前残留的ACK影响
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER]
-        ack_event.clear()
-        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
-        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
-        if ack_event.is_set():
-            logger.debug("Found residual ACK after clear, clearing again...")
-            ack_event.clear()
-        # 然后发送命令
+        # 发送命令
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
-        # 等待ACK（_wait_for_ack_with_recovery 内部会再次clear，但由于我们已经clear过了，这不会造成问题）
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
         if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
             logger.debug("set_channel_power ACK")
             return True
@@ -1424,9 +1421,12 @@ class SmartUSBHub:
                                  the power state of the single channel if only one channel is queried,
                                  or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_channel_power_status ACK")
 
@@ -1456,9 +1456,7 @@ class SmartUSBHub:
             channels = [channel]
             self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, channels,1)
 
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER_INTERLOCK]
-        ack_event.clear()
-        if ack_event.wait(timeout=self.com_timeout): 
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER_INTERLOCK):
             logger.debug("set_channel_power_interlock ACK")
             return True
         else:
@@ -1479,9 +1477,12 @@ class SmartUSBHub:
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
 
-        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_voltage ACK")
             return self.channel_voltages.get(channel)
@@ -1503,9 +1504,12 @@ class SmartUSBHub:
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
 
-        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CURRENT]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_current ACK")
             return self.channel_currents.get(channel)
@@ -1524,9 +1528,7 @@ class SmartUSBHub:
             state (int): 1 to enable data line, 0 to disable.
         """
         self._send_packet(CMD_SET_CHANNEL_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_DATALINE):
             logger.debug("set_channel_usb2_dataline ACK")
             return True
         else:
@@ -1544,9 +1546,12 @@ class SmartUSBHub:
         Returns:
             dict or None: A dictionary with channel numbers as keys and data line states as values, or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_channel_usb2_dataline_status ACK")
             return self.channel_dataline_status
@@ -1567,9 +1572,7 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
         """
         self._send_packet(CMD_SET_CHANNEL_USB3_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_USB3_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_USB3_DATALINE):
             logger.debug("set_channel_usb3_dataline ACK")
             return True
         else:
@@ -1587,9 +1590,12 @@ class SmartUSBHub:
         Returns:
             dict or None: A dictionary with channel numbers as keys and USB3 data line states as values, or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_usb3_dataline_status ACK")
             return self.channel_usb3_dataline_status
@@ -1718,17 +1724,10 @@ class SmartUSBHub:
             if not fast_charge_event.wait(3.1):
                 logger.warning("Previous fast charge command timeout, proceeding anyway...")
         
-        # 先清除事件，避免之前残留的ACK影响
-        ack_event = self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE]
-        ack_event.clear()
-        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
-        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
-        if ack_event.is_set():
-            logger.debug("Found residual ACK after clear, clearing again...")
-            ack_event.clear()
-        # 然后发送命令
+        # 发送命令
         self._send_packet(CMD_SET_CHANNEL_SLOW_CHARGE, channels, 1)
-        if ack_event.wait(self.com_timeout):
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_SLOW_CHARGE):
             logger.debug("set_channel_slow_charge ACK")
             return True
         else:
@@ -1766,17 +1765,10 @@ class SmartUSBHub:
             if not slow_charge_event.wait(3.1):
                 logger.warning("Previous slow charge command timeout, proceeding anyway...")
         
-        # 先清除事件，避免之前残留的ACK影响
-        ack_event = self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE]
-        ack_event.clear()
-        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
-        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
-        if ack_event.is_set():
-            logger.debug("Found residual ACK after clear, clearing again...")
-            ack_event.clear()
-        # 然后发送命令
+        # 发送命令
         self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, channels, 1)
-        if ack_event.wait(self.com_timeout):
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_FAST_CHARGE):
             logger.debug("set_channel_fast_charge ACK")
             return True
         else:
@@ -1799,13 +1791,9 @@ class SmartUSBHub:
         # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE]
         ack_event.clear()
-        # 清除后立即检查是否有残留的ACK（可能在clear()之后立即到达）
-        time.sleep(0.01)  # 短暂等待，让可能的残留ACK到达
-        if ack_event.is_set():
-            logger.debug("Found residual ACK after clear, clearing again...")
-            ack_event.clear()
-        # 然后发送命令
+        # 发送命令
         self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_charge_mode ACK")
             result = {}
@@ -1832,9 +1820,7 @@ class SmartUSBHub:
         data_val = 1 if enable else 0
 
         self._send_packet(CMD_SET_BUTTON_CONTROL, None, data_val)
-        ack_event = self.ack_events[CMD_SET_BUTTON_CONTROL]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_BUTTON_CONTROL):
             logger.debug("set_button_control ACK")
             return True
         else:
@@ -1849,8 +1835,13 @@ class SmartUSBHub:
         Returns:
             int or None: 1 if enabled, 0 if disabled, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_BUTTON_CONTROL_STATUS]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_BUTTON_CONTROL_STATUS):
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
             logger.debug("get_button_control_status ACK")
             return self.button_control_status
         else:
@@ -1873,9 +1864,7 @@ class SmartUSBHub:
         if status is None:
             status = 0
         self._send_packet(CMD_SET_DEFAULT_POWER_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_POWER_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_POWER_STATUS):
             logger.debug("set_default_power_status ACK")
             return True
         else:
@@ -1893,8 +1882,13 @@ class SmartUSBHub:
         Returns:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_DEFAULT_POWER_STATUS]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels,[0,0])
-        if self._wait_for_ack_with_recovery(CMD_GET_DEFAULT_POWER_STATUS):  
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):  
             logger.debug("get_default_power_status ACK")
             result = {}
             for ch in channels:
@@ -1927,9 +1921,7 @@ class SmartUSBHub:
         if status is None:
             status = 0
         self._send_packet(CMD_SET_DEFAULT_DATALINE_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_DATALINE_STATUS):
             logger.debug("set_default_dataline_status ACK")
             return True
         else:
@@ -1947,8 +1939,13 @@ class SmartUSBHub:
         Returns:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_DEFAULT_DATALINE_STATUS]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels,[0,0])
-        if self._wait_for_ack_with_recovery(CMD_GET_DEFAULT_DATALINE_STATUS):  
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):  
             logger.debug("get_default_dataline_status ACK")
             result = {}
             for ch in channels:
@@ -1979,9 +1976,7 @@ class SmartUSBHub:
         data_val = 1 if enable else 0
 
         self._send_packet(CMD_SET_AUTO_RESTORE, None, data_val)
-        ack_event = self.ack_events[CMD_SET_AUTO_RESTORE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_AUTO_RESTORE):
             logger.debug("set_auto_restore ACK")
             return True
         else:
@@ -1996,8 +1991,13 @@ class SmartUSBHub:
         Returns:
             int or None: 1 if auto-restore is enabled, 0 if disabled, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_AUTO_RESTORE_STATUS]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_AUTO_RESTORE_STATUS):
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
             logger.debug("get_auto_restore_status ACK")
             return self.auto_restore_status
         else:
@@ -2038,8 +2038,13 @@ class SmartUSBHub:
         Returns:
             16-bit device address or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_DEVICE_ADDRESS]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_DEVICE_ADDRESS):
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
             logger.debug("get_device_address ACK")
             return self.device_address
         else:
@@ -2072,8 +2077,13 @@ class SmartUSBHub:
         Returns:
             int or None: The firmware version, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_FIRMWARE_VERSION]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_FIRMWARE_VERSION):
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
             logger.debug("get_firmware_version ACK")
             return self.firmware_version
         else:
@@ -2088,8 +2098,13 @@ class SmartUSBHub:
         Returns:
             int or None: The hardware version, or None if no response.
         """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_HARDWARE_VERSION]
+        ack_event.clear()
+        # 发送命令
         self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
-        if self._wait_for_ack_with_recovery(CMD_GET_HARDWARE_VERSION):
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
             logger.debug("get_hardware_version ACK")
             return self.hardware_version
         else:
