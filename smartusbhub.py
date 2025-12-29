@@ -1140,6 +1140,8 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_dataline_status[ch] = value
             logger.debug(f"Get Channel Dataline: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS].set()
 
     def _handle_set_channel_usb3_dataline(self, channel, value):
         logger.debug("_handle_set_channel_usb3_dataline ACK")
@@ -1154,6 +1156,8 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_usb3_dataline_status[ch] = value
             logger.debug(f"Get Channel USB3 Dataline: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS].set()
 
     def _handle_set_channel_slow_charge(self, channel, value):
         logger.debug("_handle_set_channel_slow_charge ACK")
@@ -1453,17 +1457,27 @@ class SmartUSBHub:
         ack_event.clear()
         # 发送命令
         self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
-        # 等待ACK
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_channel_power_status ACK")
-
-            if len(channels) == 1:
-                return self.channel_power_status.get(channels[0], None)
-            logger.debug(f"get_channel_power_status: {self.channel_power_status}")
-            return self.channel_power_status
+        
+        # 如果是多通道查询，需要等待所有ACK都被解析
+        if len(channels) > 1:
+            # 等待第一个ACK到达
+            if ack_event.wait(self.com_timeout):
+                # 即使收到第一个ACK，也要继续等待一小段时间，确保所有ACK都被解析
+                time.sleep(0.05)  # 等待50ms，给其他ACK时间到达并被解析
+                logger.debug("get_channel_power_status ACK")
+                logger.debug(f"get_channel_power_status: {self.channel_power_status}")
+                return self.channel_power_status
+            else:
+                logger.error("get_channel_power_status No ACK!")
+                return None
         else:
-            logger.error("get_channel_power_status No ACK!")
-            return None
+            # 单通道查询，使用原来的逻辑
+            if ack_event.wait(self.com_timeout):  
+                logger.debug("get_channel_power_status ACK")
+                return self.channel_power_status.get(channels[0], None)
+            else:
+                logger.error("get_channel_power_status No ACK!")
+                return None
 
     @synchronized
     def set_channel_power_interlock(self,channel):

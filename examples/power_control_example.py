@@ -36,73 +36,148 @@ def main():
     print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
     print()
 
-    interval = 0.5
+    interval = 0.01
 
-    print("\ncontrol channel power one by one:")
+    # print("\ncontrol channel power one by one:")
 
-    print("turn on channels 1")
-    hub.set_channel_power(1, state=1)
-    time.sleep(interval)
+    # print("turn on channels 1")
+    # hub.set_channel_power(1, state=1)
+    # time.sleep(interval)
 
-    print("turn on channels 2")
-    hub.set_channel_power(2, state=1)
-    time.sleep(interval)
+    # print("turn on channels 2")
+    # hub.set_channel_power(2, state=1)
+    # time.sleep(interval)
 
-    print("turn on channels 3")
-    hub.set_channel_power(3, state=1)
-    time.sleep(interval)
+    # print("turn on channels 3")
+    # hub.set_channel_power(3, state=1)
+    # time.sleep(interval)
 
-    print("turn on channels 4")
-    hub.set_channel_power(4, state=1)
-    time.sleep(interval) 
+    # print("turn on channels 4")
+    # hub.set_channel_power(4, state=1)
+    # time.sleep(interval) 
 
-    print("turn off channels 1")
-    hub.set_channel_power(1, state=0)
-    time.sleep(interval)
+    # print("turn off channels 1")
+    # hub.set_channel_power(1, state=0)
+    # time.sleep(interval)
 
-    print("turn off channels 2")
-    hub.set_channel_power(2, state=0)
-    time.sleep(interval)
+    # print("turn off channels 2")
+    # hub.set_channel_power(2, state=0)
+    # time.sleep(interval)
 
-    print("turn off channels 3")
-    hub.set_channel_power(3, state=0)
-    time.sleep(interval)
+    # print("turn off channels 3")
+    # hub.set_channel_power(3, state=0)
+    # time.sleep(interval)
 
-    print("turn off channels 4")
-    hub.set_channel_power(4, state=0)
-    time.sleep(interval)
+    # print("turn off channels 4")
+    # hub.set_channel_power(4, state=0)
+    # time.sleep(interval)
     
-    print("\ncontrol multi channel power at once:")
-    print("turn on channels 1,3")
-    hub.set_channel_power(1, 3, state=1)
-    time.sleep(interval)
+    # print("\ncontrol multi channel power at once:")
+    # print("turn on channels 1,3")
+    # hub.set_channel_power(1, 3, state=1)
+    # time.sleep(interval)
 
-    print("turn off channels 1,3")
-    hub.set_channel_power(1, 3, state=0)
-    time.sleep(interval)
+    # print("turn off channels 1,3")
+    # hub.set_channel_power(1, 3, state=0)
+    # time.sleep(interval)
 
 
-    print("\ncontrol channel power one by one with status check:")
+    # Power status toggle and verification
     state = 1
-    for i in range(1, 5):
-        print(f"turn on channel", i)
-        hub.set_channel_power(i, state=1)
-        if hub.get_channel_power_status(i) == 1:
-            print(f"channel {i} is on")
+    usb2_state = 1
+    usb3_state = 1
+    while True:
+        # 翻转状态
+        state = 0 if state == 1 else 1
+        
+        # 设置状态
+        hub.set_channel_power(1,2,3,4, state=state)
+        
+        # 获取状态并验证是否与设定值一致
+        channel_status = hub.get_channel_power_status(1,2,3,4)
+        if channel_status is not None:
+            # 检查所有通道的状态是否与设定值一致
+            all_match = all(channel_status.get(i) == state for i in [1,2,3,4])
+            if all_match:
+                print(f"channel 1,2,3,4 are {'on' if state == 1 else 'off'}")
+            else:
+                print(f"Failed to set channel status. Expected: {state}, Current channel status: {channel_status}")
+                raise Exception(f"channel 1,2,3,4 are not {'on' if state == 1 else 'off'}")
         else:
-            print(f"channel {i} still off")
-            raise Exception(f"channel {i} still off")
+            print(f"Failed to get channel status")
+            raise Exception("Failed to get channel status")
         time.sleep(interval)
 
-    for i in range(1, 5):
-        print(f"turn on channel", i)
-        hub.set_channel_power(i, state=0)
-        if hub.get_channel_power_status(i) == 0:
-            print(f"channel {i} is off")
+        # USB2 dataline toggle and verification
+        
+        # while True:
+        # 翻转状态
+        usb2_state = 0 if usb2_state == 1 else 1
+        
+        # 设置状态
+        hub.set_channel_usb2_dataline(1,2,3,4, state=usb2_state)
+        
+        # 获取状态并验证是否与设定值一致
+        channel_status = hub.get_channel_usb2_dataline_status(1,2,3,4)
+        if channel_status is not None:
+            # 检查所有通道的状态是否与设定值一致
+            all_match = all(channel_status.get(i) == usb2_state for i in [1,2,3,4])
+            if all_match:
+                print(f"USB2 dataline channel 1,2,3,4 are {'connected' if usb2_state == 1 else 'disconnected'}")
+            else:
+                print(f"Failed to set USB2 dataline status. Expected: {usb2_state}, Current channel status: {channel_status}")
+                raise Exception(f"USB2 dataline channel 1,2,3,4 are not {'connected' if usb2_state == 1 else 'disconnected'}")
         else:
-            print(f"channel {i} still on")
-            raise Exception(f"channel {i} still on")
+            print(f"Failed to get USB2 dataline status")
+            raise Exception("Failed to get USB2 dataline status")
         time.sleep(interval)
+
+        # USB3 dataline toggle and verification
+        
+        # while True:
+        # 翻转状态
+        usb3_state = 0 if usb3_state == 1 else 1
+        
+        # 设置状态
+        hub.set_channel_usb3_dataline(1,2,3,4, state=usb3_state)
+        
+        # 获取状态并验证是否与设定值一致
+        channel_status = hub.get_channel_usb3_dataline_status(1,2,3,4)
+        if channel_status is not None:
+            # 检查所有通道的状态是否与设定值一致
+            all_match = all(channel_status.get(i) == usb3_state for i in [1,2,3,4])
+            if all_match:
+                print(f"USB3 dataline channel 1,2,3,4 are {'connected' if usb3_state == 1 else 'disconnected'}")
+            else:
+                print(f"Failed to set USB3 dataline status. Expected: {usb3_state}, Current channel status: {channel_status}")
+                raise Exception(f"USB3 dataline channel 1,2,3,4 are not {'connected' if usb3_state == 1 else 'disconnected'}")
+        else:
+            print(f"Failed to get USB3 dataline status")
+            raise Exception("Failed to get USB3 dataline status")
+        time.sleep(interval)
+
+    while True:
+        print("\ncontrol channel power one by one with status check:")
+        state = 1
+        for i in range(1, 5):
+            print(f"turn on channel", i)
+            hub.set_channel_power(i, state=1)
+            if hub.get_channel_power_status(i) == 1:
+                print(f"channel {i} is on")
+            else:
+                print(f"channel {i} still off")
+                raise Exception(f"channel {i} still off")
+            time.sleep(interval)
+
+        for i in range(1, 5):
+            print(f"turn on channel", i)
+            hub.set_channel_power(i, state=0)
+            if hub.get_channel_power_status(i) == 0:
+                print(f"channel {i} is off")
+            else:
+                print(f"channel {i} still on")
+                raise Exception(f"channel {i} still on")
+            time.sleep(interval)
 
     print("\ncontrol multi channel power at once with status check:")
     state = 1
