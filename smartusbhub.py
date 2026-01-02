@@ -285,6 +285,7 @@ CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
 CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
 CMD_REBOOT_MCU                      = 0xF7
+CMD_GET_PRODUCT_TYPE                = 0xF0
 CMD_FACTORY_RESET                   = 0xFC   
 CMD_GET_FIRMWARE_VERSION            = 0xFD
 CMD_GET_HARDWARE_VERSION            = 0xFE
@@ -517,6 +518,7 @@ class SmartUSBHub:
             CMD_SET_DEVICE_ADDRESS: threading.Event(),
             CMD_GET_DEVICE_ADDRESS: threading.Event(),
             CMD_REBOOT_MCU: threading.Event(),
+            CMD_GET_PRODUCT_TYPE: threading.Event(),
             CMD_FACTORY_RESET:threading.Event(),
             CMD_GET_FIRMWARE_VERSION: threading.Event(),
             CMD_GET_HARDWARE_VERSION: threading.Event(),
@@ -539,6 +541,7 @@ class SmartUSBHub:
         self.poweroff_recover = None
         self.hardware_version = None
         self.firmware_version = None
+        self.product_type = None
         self.operate_mode = None
         self.auto_restore_status = None
         self.button_control_status = None
@@ -886,6 +889,8 @@ class SmartUSBHub:
                                 self._handle_firmware_version(value)
                             elif cmd == CMD_GET_HARDWARE_VERSION:
                                 self._handle_hardware_version(value)
+                            elif cmd == CMD_GET_PRODUCT_TYPE:
+                                self._handle_product_type(value)
                             if cmd in self.ack_events:
                                 self._invoke_callback(cmd,channel,value)
                                 self.ack_events[cmd].set()
@@ -1281,6 +1286,10 @@ class SmartUSBHub:
         logger.debug("_handle_hardware_version ACK")
         self.hardware_version = value
 
+    def _handle_product_type(self, value):
+        logger.debug("_handle_product_type ACK")
+        self.product_type = value
+
     def _handle_set_auto_restore(self):
         logger.debug("_handle_set_auto_restore ACK")
 
@@ -1339,6 +1348,7 @@ class SmartUSBHub:
         
         self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
         self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
+        self.product_type = self._retry_get_info(self.get_product_type, "product_type")
         self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
         self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
         self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
@@ -1354,11 +1364,21 @@ class SmartUSBHub:
         if default_dataline is not None:
             self.channel_default_dataline_status = default_dataline
 
+        # 产品类型映射
+        product_type_map = {
+            0x00: "HBP_USB2_4CH",
+            0x01: "HBP_USB2_2CH",
+            0x02: "HBP_USB3_4CH",
+            0x03: "FLEX_3CH"
+        }
+        product_type_name = product_type_map.get(self.product_type, f"Unknown({self.product_type})" if self.product_type is not None else "N/A")
+        
         hub_info = {
             "id": self.port.split("/")[-1],
             "address": self.device_address,
             "hardware_version": self.hardware_version,
             "firmware_version": self.firmware_version,
+            "product_type": product_type_name,
             "operate_mode": "normal" if self.operate_mode == 0 else "interlock" if self.operate_mode == 1 else "N/A",
             "auto_restore": "enabled" if self.auto_restore_status == 1 else "disabled",
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
@@ -1371,6 +1391,8 @@ class SmartUSBHub:
             logger.warning("Failed to get hardware_version after retries")
         if self.firmware_version is None:
             logger.warning("Failed to get firmware_version after retries")
+        if self.product_type is None:
+            logger.warning("Failed to get product_type after retries")
             
         return hub_info
         
@@ -2184,4 +2206,30 @@ class SmartUSBHub:
             return self.hardware_version
         else:
             logger.error("get_hardware_version No ACK!")
+            return None
+
+    @synchronized
+    def get_product_type(self):
+        """
+        Query the device's product type.
+
+        Returns:
+            int or None: The product type, or None if no response.
+            Product types:
+                0x00: HBP_USB2_4CH
+                0x01: HBP_USB2_2CH
+                0x02: HBP_USB3_4CH
+                0x03: FLEX_3CH
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_PRODUCT_TYPE]
+        ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_PRODUCT_TYPE, None, None)
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_product_type ACK")
+            return self.product_type
+        else:
+            logger.error("get_product_type No ACK!")
             return None

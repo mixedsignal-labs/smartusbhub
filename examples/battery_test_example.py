@@ -57,13 +57,13 @@ def main():
                 print("-> Switching to SLOW_CHARGE (ilim mode)")
 
                 # Enable slow charge mode (limits charging current)
-                hub.set_channel_slow_charge(1, disconnect_before_switch=False)
+                hub.set_channel_slow_charge(1,2,3,4, disconnect_before_switch=False)
             else:
                 mode = "FAST_CHARGE"
                 print("-> Switching to FAST_CHARGE (full-speed charging)")
 
                 # Enable fast charge mode (full power)
-                hub.set_channel_fast_charge(1)
+                hub.set_channel_fast_charge(1,2,3,4)
 
             print(f"[STATE] mode={mode}")
             
