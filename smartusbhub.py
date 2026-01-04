@@ -302,27 +302,53 @@ OPERATE_MODE_NORMAL = 0
 OPERATE_MODE_INTERLOCK = 1
 
 # Product type definitions
-# 产品类型表：包含产品类型ID、名称和通道数量
+# 产品类型表：包含产品类型ID、名称、通道数量和功能支持标志
+# 功能支持标志说明：
+#   - enable_adc: 是否支持电压电流检测 (PRODUCT_ENABLE_CH_ADC)
+#   - enable_usb2_data_switch: 是否支持USB2.0数据线切换 (PRODUCT_ENABLE_USB2_DATA_SWITCH)
+#   - enable_usb3_data_switch: 是否支持USB3.0数据线切换 (PRODUCT_ENABLE_USB3_DATA_SWITCH)
+#   - enable_ilim_switch: 是否支持限流开关/慢充快充模式 (PRODUCT_ENABLE_ILIM_SWITCH)
+#   - is_flexconnect: 是否为FlexConnect产品 (PRODUCT_IS_FLEXCONNECT)
 PRODUCT_TYPE_TABLE = {
     0x00: {
         "name": "HBP_USB2_4CH",
         "channels": 4,
-        "description": "USB2.0 4通道集线器"
+        "description": "USB2.0 4通道集线器",
+        "enable_adc": False,              # 不支持电压电流检测
+        "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换
+        "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换
+        "enable_ilim_switch": False,       # 不支持限流开关
+        "is_flexconnect": False
     },
     0x01: {
         "name": "HBP_USB2_2CH",
         "channels": 2,
-        "description": "USB2.0 2通道集线器"
+        "description": "USB2.0 2通道集线器",
+        "enable_adc": False,              # 不支持电压电流检测
+        "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换
+        "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换
+        "enable_ilim_switch": False,       # 不支持限流开关
+        "is_flexconnect": False
     },
     0x02: {
         "name": "HBP_USB3_4CH",
         "channels": 4,
-        "description": "USB3.0 4通道集线器"
+        "description": "USB3.0 4通道集线器",
+        "enable_adc": False,              # 不支持电压电流检测
+        "enable_usb2_data_switch": True, # 支持USB2.0数据线切换
+        "enable_usb3_data_switch": True,  # 支持USB3.0数据线切换
+        "enable_ilim_switch": True,        # 支持限流开关（慢充/快充模式）
+        "is_flexconnect": False
     },
     0x03: {
         "name": "FLEX_3CH",
         "channels": 3,
-        "description": "FlexConnect 3通道切换器"
+        "description": "FlexConnect 3通道切换器",
+        "enable_adc": False,              # 不支持电压电流检测
+        "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换（使用MUX）
+        "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换（使用MUX）
+        "enable_ilim_switch": False,       # 不支持限流开关
+        "is_flexconnect": True            # 是FlexConnect产品
     }
 }
 
@@ -698,13 +724,61 @@ class SmartUSBHub:
                 - name: 产品名称（如 "HBP_USB2_4CH"）
                 - channels: 通道数量
                 - description: 产品描述
+                - enable_adc: 是否支持电压电流检测
+                - enable_usb2_data_switch: 是否支持USB2.0数据线切换
+                - enable_usb3_data_switch: 是否支持USB3.0数据线切换
+                - enable_ilim_switch: 是否支持限流开关（慢充/快充模式）
+                - is_flexconnect: 是否为FlexConnect产品
                 
         Example:
             >>> info = SmartUSBHub.get_product_info(0x00)
             >>> print(info['name'])  # "HBP_USB2_4CH"
             >>> print(info['channels'])  # 4
+            >>> print(info['enable_adc'])  # False
         """
         return PRODUCT_TYPE_TABLE.get(product_type_id)
+    
+    def _check_feature_support(self, feature_name):
+        """
+        检查当前设备是否支持指定功能。
+        
+        Args:
+            feature_name (str): 功能名称，可选值：
+                - "adc": 电压电流检测
+                - "usb2_data_switch": USB2.0数据线切换
+                - "usb3_data_switch": USB3.0数据线切换
+                - "ilim_switch": 限流开关（慢充/快充模式）
+                - "flexconnect": FlexConnect产品
+        
+        Returns:
+            bool: 如果支持该功能返回True，否则返回False
+            
+        Raises:
+            ValueError: 如果产品类型未知或功能名称无效
+        """
+        if self.product_type is None:
+            # 如果产品类型未知，尝试获取
+            self.product_type = self.get_product_type()
+        
+        if self.product_type is None:
+            raise ValueError("Product type is unknown. Cannot check feature support.")
+        
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        if product_info is None:
+            raise ValueError(f"Unknown product type: {self.product_type:#02x}")
+        
+        feature_map = {
+            "adc": "enable_adc",
+            "usb2_data_switch": "enable_usb2_data_switch",
+            "usb3_data_switch": "enable_usb3_data_switch",
+            "ilim_switch": "enable_ilim_switch",
+            "flexconnect": "is_flexconnect"
+        }
+        
+        if feature_name not in feature_map:
+            raise ValueError(f"Unknown feature name: {feature_name}. Valid features: {list(feature_map.keys())}")
+        
+        return product_info.get(feature_map[feature_name], False)
     
     @classmethod
     def scan_available_ports(cls):
@@ -1659,7 +1733,9 @@ class SmartUSBHub:
                 time.sleep(0.05)  # 等待50ms，给其他ACK时间到达并被解析
                 logger.debug("get_channel_power_status ACK")
                 logger.debug(f"get_channel_power_status: {self.channel_power_status}")
-                return self.channel_power_status
+                # 只返回查询的通道，过滤掉其他通道
+                result = {ch: self.channel_power_status.get(ch) for ch in channels if ch in self.channel_power_status}
+                return result if result else None
             else:
                 logger.error("get_channel_power_status No ACK!")
                 return None
@@ -1706,10 +1782,20 @@ class SmartUSBHub:
             channel (int): The channel to query.
 
         Returns:
-            int or None: Voltage reading for the channel, or None if timed out.
+            int or None: Voltage reading for the channel, or None if timed out or not supported.
+            
+        Raises:
+            ValueError: 如果产品不支持电压检测功能
         """
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
+        
+        # 检查产品是否支持ADC功能
+        if not self._check_feature_support("adc"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} does not support voltage/current monitoring (ADC). "
+                           f"This feature is not available on this device model.")
 
         # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
@@ -1733,10 +1819,20 @@ class SmartUSBHub:
             channel (int): The channel to query.
 
         Returns:
-            int or None: Current reading for the channel, or None if timed out.
+            int or None: Current reading for the channel, or None if timed out or not supported.
+            
+        Raises:
+            ValueError: 如果产品不支持电流检测功能
         """
         if isinstance(channel, (list, tuple)):
-            raise ValueError("get_channel_voltage only supports a single channel")
+            raise ValueError("get_channel_current only supports a single channel")
+        
+        # 检查产品是否支持ADC功能
+        if not self._check_feature_support("adc"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} does not support voltage/current monitoring (ADC). "
+                           f"This feature is not available on this device model.")
 
         # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CURRENT]
