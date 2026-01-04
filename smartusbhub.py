@@ -228,9 +228,24 @@ import threading
 import signal
 import sys
 from functools import wraps
+import os
+import tempfile
+import atexit
 
 import logging
 import colorlog
+
+# 跨进程文件锁支持
+try:
+    import fcntl  # Unix/Linux/macOS
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+    try:
+        import msvcrt  # Windows
+        HAS_MSVCRT = True
+    except ImportError:
+        HAS_MSVCRT = False
 
 # Command definitions
 CMD_GET_CHANNEL_POWER_STATUS        = 0x00
@@ -265,8 +280,9 @@ CMD_GET_OPERATE_MODE                = 0x07
 CMD_SET_DEVICE_ADDRESS              = 0x11
 CMD_GET_DEVICE_ADDRESS              = 0x12
 
-CMD_SET_CHANNEL_LOW_CURRENT         = 0x13
-CMD_GET_CHANNEL_LOW_CURRENT         = 0x14
+CMD_SET_CHANNEL_SLOW_CHARGE         = 0x13
+CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
+CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
 CMD_REBOOT_MCU                      = 0xF7
 CMD_GET_SERIAL_NO                   = 0xF9
@@ -365,6 +381,108 @@ class SmartUSBHub:
 
     Suitable for automated test systems and development workflows in hardware engineering environments.
     """
+    
+    # 类级别的已连接端口跟踪（用于多设备场景）
+    _connected_ports = set()
+    _connected_addresses = {}  # {port: address} 映射
+    # 跨进程文件锁字典 {port: lock_file_handle}
+    _port_locks = {}
+    _lock_dir = None  # 锁文件目录
+    
+    @classmethod
+    def _get_lock_dir(cls):
+        """获取锁文件目录"""
+        if cls._lock_dir is None:
+            # 使用临时目录存放锁文件
+            cls._lock_dir = os.path.join(tempfile.gettempdir(), 'smartusbhub_locks')
+            os.makedirs(cls._lock_dir, exist_ok=True)
+        return cls._lock_dir
+    
+    @classmethod
+    def _acquire_port_lock(cls, port):
+        """
+        获取端口的跨进程文件锁
+        
+        Args:
+            port (str): 串口名称
+            
+        Returns:
+            bool: 如果成功获取锁返回 True，否则返回 False
+        """
+        if port in cls._port_locks:
+            # 如果已经持有锁，返回 True
+            return True
+        
+        # 生成锁文件路径（将端口名中的特殊字符替换为安全字符）
+        safe_port_name = port.replace('/', '_').replace('\\', '_').replace(':', '_')
+        lock_file_path = os.path.join(cls._get_lock_dir(), f'{safe_port_name}.lock')
+        
+        try:
+            # 打开锁文件（如果不存在则创建）
+            lock_file = open(lock_file_path, 'w')
+            
+            # 尝试获取文件锁（非阻塞）
+            if HAS_FCNTL:
+                # Unix/Linux/macOS 使用 fcntl
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    cls._port_locks[port] = lock_file
+                    # 写入当前进程ID，便于调试
+                    lock_file.write(str(os.getpid()))
+                    lock_file.flush()
+                    logger.debug(f"Acquired file lock for port {port}")
+                    return True
+                except (IOError, OSError):
+                    # 锁已被其他进程持有
+                    lock_file.close()
+                    logger.warning(f"Port {port} is locked by another process")
+                    return False
+            elif HAS_MSVCRT:
+                # Windows 使用 msvcrt
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    cls._port_locks[port] = lock_file
+                    lock_file.write(str(os.getpid()))
+                    lock_file.flush()
+                    logger.debug(f"Acquired file lock for port {port}")
+                    return True
+                except IOError:
+                    lock_file.close()
+                    logger.warning(f"Port {port} is locked by another process")
+                    return False
+            else:
+                # 不支持文件锁的系统，回退到进程内检查
+                logger.warning("File locking not supported on this system, falling back to process-level check")
+                lock_file.close()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to acquire lock for port {port}: {e}")
+            return False
+    
+    @classmethod
+    def _release_port_lock(cls, port):
+        """
+        释放端口的跨进程文件锁
+        
+        Args:
+            port (str): 串口名称
+        """
+        if port not in cls._port_locks:
+            return
+        
+        lock_file = cls._port_locks.pop(port)
+        try:
+            if HAS_FCNTL:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif HAS_MSVCRT:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_file.close()
+            logger.debug(f"Released file lock for port {port}")
+        except Exception as e:
+            logger.error(f"Failed to release lock for port {port}: {e}")
+    # 跨进程文件锁字典 {port: lock_file_handle}
+    _port_locks = {}
+    _lock_dir = None  # 锁文件目录
 
     def __init__(self, port):
         """
@@ -374,7 +492,30 @@ class SmartUSBHub:
             port (str): The serial port name to connect to the device.
         """
         self.port = port
-        self.ser = serial.Serial(port, 115200,timeout = 0.5)
+        self._lock_file = None
+        self._lock_file_handle = None
+        
+        # 检查端口是否已被占用（进程内检查）
+        if port in SmartUSBHub._connected_ports:
+            raise ValueError(f"Port {port} is already in use by another SmartUSBHub instance. "
+                           f"Please disconnect the existing instance first or use a different port.")
+        
+        # 获取跨进程文件锁
+        if not self._acquire_port_lock(port):
+            raise ValueError(f"Port {port} is already in use by another process. "
+                           f"Please disconnect the existing connection first or use a different port.")
+        
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0.5)
+            # 记录已连接的端口（只有在成功打开串口后才记录）
+            SmartUSBHub._connected_ports.add(port)
+        except serial.SerialException as e:
+            # 如果打开串口失败，释放文件锁
+            self._release_port_lock(port)
+            if "could not open port" in str(e).lower() or "access is denied" in str(e).lower():
+                raise ValueError(f"Port {port} is already in use. Please disconnect the existing connection first.")
+            raise
+        
         self.com_timeout = 0.1
         logger.info(f"SmartUSBHub initialized on port {self.port}")
 
@@ -390,8 +531,9 @@ class SmartUSBHub:
             CMD_GET_CHANNEL_DATALINE_STATUS: threading.Event(),
             CMD_SET_CHANNEL_USB3_DATALINE: threading.Event(),
             CMD_GET_CHANNEL_USB3_DATALINE_STATUS: threading.Event(),
-            CMD_SET_CHANNEL_LOW_CURRENT: threading.Event(),
-            CMD_GET_CHANNEL_LOW_CURRENT: threading.Event(),
+            CMD_SET_CHANNEL_SLOW_CHARGE: threading.Event(),
+            CMD_SET_CHANNEL_FAST_CHARGE: threading.Event(),
+            CMD_GET_CHANNEL_CHARGE_MODE: threading.Event(),
             CMD_SET_BUTTON_CONTROL: threading.Event(),
             CMD_GET_BUTTON_CONTROL_STATUS: threading.Event(),
             CMD_SET_DEFAULT_POWER_STATUS: threading.Event(),
@@ -412,6 +554,16 @@ class SmartUSBHub:
         }
         
         self.lock = threading.Lock()  # 用于串口操作的互斥锁
+        
+        # 串口发送同步锁（即使 ENABLE_SYNC_LOCK = False 也保护串口发送，避免命令交错）
+        self._send_lock = threading.Lock()
+        self._last_send_time = 0  # 上次发送命令的时间戳
+        # 最小发送间隔：确保命令之间至少间隔一定时间，避免 MCU 状态机混乱
+        # 即使 ENABLE_SYNC_LOCK = False，也通过此机制保证串口命令不会交错
+        self._min_send_interval = 0.010  # 最小发送间隔 10ms
+        # MCU 响应等待时间：发送命令后等待 MCU 开始响应的时间
+        # 这确保 MCU 有时间处理命令并开始发送 ACK，实现命令-响应同步
+        self._mcu_response_wait = 0.005  # 5ms，让 MCU 有时间处理命令并开始发送 ACK
 
         self.callbacks = {cmd: None for cmd in self.ack_events.keys()}
         
@@ -435,18 +587,39 @@ class SmartUSBHub:
         self.channel_usb3_dataline_status = {}
         self.channel_voltages = {}
         self.channel_currents = {}
-        self.channel_low_current_status = {}
+        self.channel_charge_modes = {}
 
         self.device_address = None
 
         self.disconnect_callback = None
+        
+        # 错误恢复机制：跟踪连续失败次数
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5  # 连续5次失败后触发恢复
 
         self._start()
+        # 等待 MCU 状态机恢复（如果之前处于错误状态）
+        # MCU 的状态卡住检测是 100ms，超时检测是 20ms，所以等待 150ms 确保恢复
+        time.sleep(0.15)
         self.get_device_info()
         
-        if self.get_operate_mode is None:
+        if self.operate_mode is None:
             logger.error("Failed to get operate mode.")
+            # 清理已连接端口记录和串口
+            if self.port in SmartUSBHub._connected_ports:
+                SmartUSBHub._connected_ports.discard(self.port)
+            if self.port in SmartUSBHub._connected_addresses:
+                del SmartUSBHub._connected_addresses[self.port]
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except:
+                    pass
             sys.exit(1)
+        
+        # 记录设备地址
+        if self.device_address is not None:
+            SmartUSBHub._connected_addresses[port] = self.device_address
             
         logger.info(f"Hardware version: V1.{self.hardware_version}")
         logger.info(f"Firmware version: V1.{self.firmware_version}")
@@ -529,24 +702,72 @@ class SmartUSBHub:
         return port_list
     
     @classmethod
-    def scan_and_connect(cls):
+    def scan_and_connect(cls, exclude_ports=None, device_address=None):
         """
         Searches for available Smart USB Hub devices and connects to the first valid one.
+        
+        Args:
+            exclude_ports (set, optional): 要排除的端口集合（已连接的端口）。如果为None，自动排除已连接的端口。
+            device_address (int, optional): 要连接的设备地址。如果指定，会尝试连接所有未连接的设备，直到找到匹配地址的设备。
+                                            **注意**: 由于设备地址默认为0，多个设备可能地址相同，建议使用端口号来区分设备。
 
         Returns:
             SmartUSBHub or None: An instance of SmartUSBHub if found, otherwise None.
         """
+        if exclude_ports is None:
+            exclude_ports = cls._connected_ports.copy()
+        
         for port_info in serial.tools.list_ports.comports():
             port_name = port_info.device
+            
+            # 跳过已连接的端口
+            if port_name in exclude_ports:
+                logger.debug(f"Skipping already connected port {port_name}")
+                continue
+            
             logger.debug(f"Trying to connect to port {port_name}")
             if port_info.vid == 0x1A86 and port_info.pid == 0xfe0c:
-                hub = cls(port_name)
-                port_suffix = port_name.split("/")[-1]
-                hub.name = f"smarthub_id:{port_suffix}"
-                return hub
+                try:
+                    hub = cls(port_name)
+                    port_suffix = port_name.split("/")[-1]
+                    hub.name = f"smarthub_id:{port_suffix}"
+                    
+                    # 如果指定了设备地址，检查是否匹配
+                    # 注意：设备地址默认为0，多个设备可能地址相同，所以此方法可能不够准确
+                    if device_address is not None:
+                        if hub.device_address != device_address:
+                            logger.debug(f"Device address mismatch on port {port_name}: expected {device_address:#04x}, got {hub.device_address:#04x}")
+                            hub.disconnect()
+                            continue
+                        else:
+                            logger.info(f"Found device with address {device_address:#04x} on port {port_name}")
+                    
+                    return hub
+                except (ValueError, serial.SerialException) as e:
+                    logger.warning(f"Failed to connect to {port_name}: {e}")
+                    continue
 
-        logger.error("No Smart USB Hub found.")
+        if device_address is not None:
+            logger.warning(f"No Smart USB Hub found with address {device_address:#04x}, or all devices are already connected.")
+        else:
+            logger.warning("No Smart USB Hub found, or all devices are already connected.")
         return None
+    
+    @classmethod
+    def scan_and_connect_by_address(cls, device_address):
+        """
+        通过设备地址连接指定的Smart USB Hub设备。
+        
+        **警告**: 由于设备地址默认为0，多个设备可能地址相同，此方法可能不够准确。
+        建议使用 `scan_and_connect()` 并通过端口号来区分设备，或者先为每个设备设置不同的地址。
+        
+        Args:
+            device_address (int): 要连接的设备地址（0x0000 - 0xFFFF）。
+        
+        Returns:
+            SmartUSBHub or None: 如果找到匹配地址的设备则返回实例，否则返回None。
+        """
+        return cls.scan_and_connect(device_address=device_address)
     
     def _start(self):
         """
@@ -562,10 +783,20 @@ class SmartUSBHub:
         Disconnects from the device and stops the UART receive thread.
         """
         self.stop_event.set()
-        self.uart_recv_thread.join(timeout=1)
+        if hasattr(self, 'uart_recv_thread'):
+            self.uart_recv_thread.join(timeout=1)
         if self.ser and self.ser.is_open:
             self.ser.flush()
             self.ser.close()
+        
+        # 从已连接端口列表中移除
+        if self.port in SmartUSBHub._connected_ports:
+            SmartUSBHub._connected_ports.discard(self.port)
+        if self.port in SmartUSBHub._connected_addresses:
+            del SmartUSBHub._connected_addresses[self.port]
+        
+        # 释放跨进程文件锁
+        self._release_port_lock(self.port)
     def is_connected(self):
         """
         Check if the device's serial port is connected and open.
@@ -590,15 +821,37 @@ class SmartUSBHub:
             self.ser.close()
         sys.exit(0)
 
+    def _cal_crc16(self, data):
+        """
+        Calculate CRC16 (polynomial: 0x8005, initial: 0xFFFF)
+        
+        Args:
+            data (bytes): Data to calculate CRC16 for
+            
+        Returns:
+            int: CRC16 value
+        """
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0x8005
+                else:
+                    crc = crc >> 1
+        return crc & 0xFFFF
+
     def _parse_protocol_frame(self, data):
         """
         Processes a raw data frame from the device and delivers it to the correct handler.
+        Supports V1, V2, and V3 protocols.
 
         Args:
             data (bytes): Raw bytes read from the device.
 
         Returns:
             tuple or None: Parsed command, channel, value, and length if valid, otherwise None.
+            For V3 protocol: returns (cmd, 0, data_string, total_length)
         """
 
         # logger.debug(f"Received data: {data.hex()}")
@@ -606,6 +859,38 @@ class SmartUSBHub:
         if len(data) < 6:
             return None
 
+        # Check for V3 protocol (0x55 0xAB)
+        if data[0] == 0x55 and data[1] == 0xAB:
+            # V3 protocol format: [0x55, 0xAB, CRC16(2), cmd(2), length(2), data...]
+            if len(data) < 8:  # Minimum header size
+                return None
+            
+            # Read CRC16, cmd, and length (all little-endian)
+            received_crc16 = data[2] | (data[3] << 8)
+            cmd = data[4] | (data[5] << 8)
+            data_length = data[6] | (data[7] << 8)
+            
+            # Check if we have enough data
+            total_length = 8 + data_length
+            if len(data) < total_length:
+                return None
+            
+            # Calculate CRC16 for: cmd(2) + length(2) + data(data_length)
+            crc_data = data[4:4+2+2+data_length]  # cmd + length + data
+            calculated_crc16 = self._cal_crc16(crc_data)
+            
+            if calculated_crc16 != received_crc16:
+                logger.debug(f"Invalid CRC16 for V3 protocol: calculated={calculated_crc16:04X}, received={received_crc16:04X}")
+                return None
+            
+            # Extract data as string
+            data_bytes = data[8:8+data_length]
+            data_string = data_bytes.decode('utf-8', errors='ignore')
+            
+            logger.debug(f"Received V3 protocol: cmd={cmd:04X}, length={data_length}, data={data_string}")
+            return (cmd, 0, data_string, total_length)
+        
+        # V1/V2 protocol (0x55 0x5A)
         if data[0] != 0x55 or data[1] != 0x5A:
             return None
 
@@ -648,7 +933,9 @@ class SmartUSBHub:
                 if self.ser is not None and self.ser.in_waiting > 0:
                     buffer.extend(self.ser.read(self.ser.in_waiting))
                     logger.debug(f"rx data: {buffer.hex()}")
-                    while len(buffer) >= 6:
+                    # Check for V3 protocol minimum size (8 bytes) or V1/V2 (6 bytes)
+                    min_size = 8 if len(buffer) >= 8 and buffer[0] == 0x55 and buffer[1] == 0xAB else 6
+                    while len(buffer) >= min_size:
                         result = self._parse_protocol_frame(buffer)
                         if result is not None:
                             cmd, channel, value, length = result
@@ -673,10 +960,12 @@ class SmartUSBHub:
                                 self._handle_set_channel_usb3_dataline(channel, value)
                             elif cmd == CMD_GET_CHANNEL_USB3_DATALINE_STATUS:
                                 self._handle_get_channel_usb3_dataline(channel, value)
-                            elif cmd == CMD_SET_CHANNEL_LOW_CURRENT:
-                                self._handle_set_channel_low_current(channel, value)
-                            elif cmd == CMD_GET_CHANNEL_LOW_CURRENT:
-                                self._handle_get_channel_low_current(channel, value)
+                            elif cmd == CMD_SET_CHANNEL_SLOW_CHARGE:
+                                self._handle_set_channel_slow_charge(channel, value)
+                            elif cmd == CMD_SET_CHANNEL_FAST_CHARGE:
+                                self._handle_set_channel_fast_charge(channel, value)
+                            elif cmd == CMD_GET_CHANNEL_CHARGE_MODE:
+                                self._handle_get_channel_charge_mode(channel, value)
                             elif cmd == CMD_SET_BUTTON_CONTROL:
                                 self._handle_set_button_control()
                             elif cmd == CMD_GET_BUTTON_CONTROL_STATUS:
@@ -701,6 +990,8 @@ class SmartUSBHub:
                                 self._handle_set_device_address()
                             elif cmd == CMD_GET_DEVICE_ADDRESS:
                                 self._handle_get_device_address(channel,value)#msb lsb
+                            elif cmd == CMD_REBOOT_MCU:
+                                self._handle_reboot_mcu()
                             elif cmd == CMD_FACTORY_RESET:
                                 self._handle_factory_reset()
                             elif cmd == CMD_GET_FIRMWARE_VERSION:
@@ -722,12 +1013,31 @@ class SmartUSBHub:
                         else:
                             buffer.pop(0)
             except (OSError, AttributeError,serial.SerialException) as e:
-                logger.error(f"Error reading from UART: {e}")
+                # 检查是否是预期的断开（设备重启等）
+                # errno 6 = ENXIO (Device not configured) 通常表示设备已断开
+                # 如果 stop_event 已经设置，说明是主动断开，不应该记录为错误
+                is_expected_disconnect = False
+                if isinstance(e, OSError) and hasattr(e, 'errno'):
+                    # errno 6 (ENXIO) 通常表示设备已断开，这在设备重启时是预期的
+                    if e.errno == 6:  # Device not configured
+                        is_expected_disconnect = True
+                
+                # 如果 stop_event 已经设置，说明是主动断开（disconnect() 被调用）
+                if self.stop_event.is_set():
+                    is_expected_disconnect = True
+                
+                if is_expected_disconnect:
+                    logger.debug(f"UART disconnected (expected): {e}")
+                else:
+                    logger.error(f"Error reading from UART: {e}")
+                
                 self.ser = None
                 if self.disconnect_callback:
                     self.disconnect_callback()
                 self.stop_event.set()
-                logger.error("UART disconnected")
+                
+                if not is_expected_disconnect:
+                    logger.error("UART disconnected")
                 break
             time.sleep(0.01)
 
@@ -793,13 +1103,103 @@ class SmartUSBHub:
         # Add checksum to packet
         packet.append(checksum)
 
-        # Send the packet
-        if self.ser and self.ser.is_open:
-            self.ser.write(packet)
-
-        logger.debug(f"Sent command: {packet.hex()}")
+        # 串口发送同步：即使 ENABLE_SYNC_LOCK = False，也保护串口发送避免命令交错
+        # 同时确保命令之间有最小间隔，并等待 MCU 响应（实现命令-响应同步）
+        with self._send_lock:
+            # 确保命令之间有最小间隔
+            current_time = time.time()
+            time_since_last_send = current_time - self._last_send_time
+            if time_since_last_send < self._min_send_interval:
+                # 如果距离上次发送时间太短，等待到最小间隔
+                time.sleep(self._min_send_interval - time_since_last_send)
+            
+            # Send the packet
+            if self.ser and self.ser.is_open:
+                self.ser.write(packet)
+            
+            # 记录发送时间
+            self._last_send_time = time.time()
+            
+            # 等待 MCU 开始响应（给 MCU 时间处理命令并开始发送 ACK）
+            # 这是与 MCU 之间的同步机制：确保 MCU 有时间处理命令后再发送下一个
+            time.sleep(self._mcu_response_wait)
+            
+            logger.debug(f"Sent command: {packet.hex()}")
 
         return packet
+    
+    def _wait_for_ack_with_recovery(self, cmd, timeout=None):
+        """
+        等待 ACK，如果连续失败则触发 MCU 状态机恢复机制。
+        
+        Args:
+            cmd: 命令代码
+            timeout: 超时时间，如果为 None 则使用 self.com_timeout
+            
+        Returns:
+            bool: 如果收到 ACK 返回 True，否则返回 False
+        """
+        if timeout is None:
+            timeout = self.com_timeout
+        
+        ack_event = self.ack_events.get(cmd)
+        if not ack_event:
+            return False
+        
+        # 先检查事件是否已经设置（ACK可能已经到达）
+        if ack_event.is_set():
+            # ACK已经到达，清除事件并返回成功
+            ack_event.clear()
+            self._consecutive_failures = 0
+            return True
+        
+        # 清除事件，准备等待新的ACK
+        ack_event.clear()
+        # 再次检查（防止在clear()之后立即到达的ACK）
+        time.sleep(0.001)  # 极短延迟，让可能的残留ACK到达
+        if ack_event.is_set():
+            # 残留ACK到达，清除并返回成功
+            ack_event.clear()
+            self._consecutive_failures = 0
+            return True
+        
+        # 等待新的ACK
+        success = ack_event.wait(timeout)
+        
+        if success:
+            # 成功时重置失败计数
+            self._consecutive_failures = 0
+            return True
+        else:
+            # 失败时增加计数
+            self._consecutive_failures += 1
+            
+            # 如果连续失败次数超过阈值，触发恢复机制
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                logger.warning(f"Too many consecutive failures ({self._consecutive_failures}), triggering MCU recovery...")
+                self._trigger_mcu_recovery()
+                # 重置失败计数，给 MCU 一次恢复的机会
+                self._consecutive_failures = 0
+            
+            return False
+    
+    def _trigger_mcu_recovery(self):
+        """
+        触发 MCU 状态机恢复机制：
+        1. 等待足够时间让 MCU 自动恢复（MCU 的状态卡住检测是 100ms，超时检测是 20ms）
+        2. 清空串口缓冲区
+        """
+        logger.debug("Triggering MCU state machine recovery...")
+        time.sleep(0.15)  # 等待 150ms 让 MCU 状态机恢复
+        
+        # 清空输入缓冲区
+        if self.ser and self.ser.is_open:
+            try:
+                if self.ser.in_waiting > 0:
+                    self.ser.reset_input_buffer()
+                    logger.debug("Cleared input buffer during recovery")
+            except Exception as e:
+                logger.warning(f"Failed to clear input buffer: {e}")
 
     def _handle_set_operate_mode(self):
         logger.debug("_handle_set_operate_mode ACK")
@@ -818,6 +1218,8 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_power_status[ch] = value
             logger.info(f"CMD_GET_CHANNEL_POWER_STATUS acked: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_POWER_STATUS].set()
 
     def _handle_power_interlock_control(self):
         logger.debug("_handle_power_interlock_control ACK")
@@ -857,6 +1259,8 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_dataline_status[ch] = value
             logger.debug(f"Get Channel Dataline: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS].set()
 
     def _handle_set_channel_usb3_dataline(self, channel, value):
         logger.debug("_handle_set_channel_usb3_dataline ACK")
@@ -871,20 +1275,34 @@ class SmartUSBHub:
         for ch in channels:
             self.channel_usb3_dataline_status[ch] = value
             logger.debug(f"Get Channel USB3 Dataline: ch{ch} = {value}")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS].set()
 
-    def _handle_set_channel_low_current(self, channel, value):
-        logger.debug("_handle_set_channel_low_current ACK")
+    def _handle_set_channel_slow_charge(self, channel, value):
+        logger.debug("_handle_set_channel_slow_charge ACK")
         channels = self._convert_channel(channel)
         for ch in channels:
-            self.channel_low_current_status[ch] = value
-            logger.debug(f"Set Channel Low Current: ch{ch} = {value}")
+            logger.debug(f"Set Channel Slow Charge: ch{ch} = enabled")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE].set()
 
-    def _handle_get_channel_low_current(self, channel, value):
-        logger.debug("_handle_get_channel_low_current ACK")
+    def _handle_set_channel_fast_charge(self, channel, value):
+        logger.debug("_handle_set_channel_fast_charge ACK")
         channels = self._convert_channel(channel)
         for ch in channels:
-            self.channel_low_current_status[ch] = value
-            logger.debug(f"Get Channel Low Current: ch{ch} = {value}")
+            logger.debug(f"Set Channel Fast Charge: ch{ch} = enabled")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE].set()
+
+    def _handle_get_channel_charge_mode(self, channel, value):
+        logger.debug("_handle_get_channel_charge_mode ACK")
+        channels = self._convert_channel(channel)
+        for ch in channels:
+            self.channel_charge_modes[ch] = value
+            mode_str = "off" if value == 0 else ("fast_charge" if value == 1 else "slow_charge")
+            logger.debug(f"Get Channel Charge Mode: ch{ch} = {mode_str} ({value})")
+        # 设置事件，通知等待的线程
+        self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE].set()
 
     def _handle_get_button_control(self, value):
         logger.debug("_handle_get_button_control ACK")
@@ -898,6 +1316,11 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_power_flag is None:
+                self.channel_default_power_flag = {}
+            if self.channel_default_power_status is None:
+                self.channel_default_power_status = {}
             for ch in channels:
                 self.channel_default_power_flag[ch] = enable
                 self.channel_default_power_status[ch] = status
@@ -910,18 +1333,28 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_power_flag is None:
+                self.channel_default_power_flag = {}
+            if self.channel_default_power_status is None:
+                self.channel_default_power_status = {}
             for ch in channels:
                 self.channel_default_power_flag[ch] = enable
                 self.channel_default_power_status[ch] = status
                 logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default power status, value: {'on' if status else 'off'}")
         else:
-            logger.error("Invalid data for _handle_set_default_power_status")
+            logger.error("Invalid data for _handle_get_default_power_status")
 
     def _handle_set_default_dataline_status(self,channel,value):
         logger.debug("_handle_set_default_dataline_status ACK")
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_dataline_flag is None:
+                self.channel_default_dataline_flag = {}
+            if self.channel_default_dataline_status is None:
+                self.channel_default_dataline_status = {}
             for ch in channels:
                 self.channel_default_dataline_flag[ch] = enable
                 self.channel_default_dataline_status[ch] = status
@@ -934,6 +1367,11 @@ class SmartUSBHub:
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
             channels = self._convert_channel(channel)
+            # 防御性检查：确保字典已初始化
+            if self.channel_default_dataline_flag is None:
+                self.channel_default_dataline_flag = {}
+            if self.channel_default_dataline_status is None:
+                self.channel_default_dataline_status = {}
             for ch in channels:
                 self.channel_default_dataline_flag[ch] = enable
                 self.channel_default_dataline_status[ch] = status
@@ -947,6 +1385,10 @@ class SmartUSBHub:
         logger.debug("_handle_get_device_address ACK")
         self.device_address = (msb << 8) | lsb
         logger.debug(f"set device address: {self.device_address}")
+    
+    def _handle_reboot_mcu(self):
+        logger.debug("_handle_reboot_mcu ACK")
+
     def _handle_factory_reset(self):
         logger.debug("_handle_factory_reset ACK")
 
@@ -995,9 +1437,47 @@ class SmartUSBHub:
         logger.debug(f"_handle_get_auto_restore_status ACK,value:{value}")
         self.auto_restore_status = value
 
+    def _retry_get_info(self, get_func, info_name, max_retry_time=10.0):
+        """
+        重试获取设备信息，直到成功或超时（至少尝试10秒）
+        
+        Args:
+            get_func: 获取信息的函数（无参数）
+            info_name: 信息名称（用于日志）
+            max_retry_time: 最大重试时间（秒），默认10秒
+            
+        Returns:
+            获取到的信息值，如果超时则返回None
+        """
+        start_time = time.time()
+        retry_count = 0
+        
+        while True:
+            result = get_func()
+            if result is not None:
+                logger.debug(f"{info_name} retrieved successfully after {retry_count} retries, {time.time() - start_time:.2f}s")
+                return result
+            
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= max_retry_time:
+                logger.error(f"{info_name} failed after {retry_count} retries, {elapsed_time:.2f}s - giving up")
+                return None
+            
+            retry_count += 1
+            # 重试间隔：前几次快速重试，之后逐渐增加间隔
+            if retry_count <= 3:
+                time.sleep(0.05)  # 50ms
+            elif retry_count <= 10:
+                time.sleep(0.1)    # 100ms
+            else:
+                time.sleep(0.2)    # 200ms
+            
+            logger.debug(f"{info_name} retry {retry_count}, elapsed: {elapsed_time:.2f}s")
+
     def get_device_info(self):
         """
         Returns the hub's ID, hardware version, firmware version, operate mode, and button control status.
+        所有关键信息都会重试直到成功或至少尝试10秒。
 
         Returns:
             dict: A dictionary containing the hub's information.
@@ -1066,6 +1546,7 @@ class SmartUSBHub:
             logger.warning("Failed to get serial_no after retries")
             
         return hub_info
+        
     @synchronized
     def set_operate_mode(self, mode):
         """
@@ -1077,14 +1558,13 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
         """
         self._send_packet(CMD_SET_OPERATE_MODE, None, mode)
-        ack_event = self.ack_events[CMD_SET_OPERATE_MODE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_OPERATE_MODE):
             logger.debug("set_operate_mode ACK")
             return True
         else:
             logger.error("set_operate_mode No ACK!")
             return False
+
     @synchronized
     def get_operate_mode(self):
         """
@@ -1093,9 +1573,12 @@ class SmartUSBHub:
         Returns:
             bool: True if the device responds in the expected mode, otherwise False.
         """
-        command = self._send_packet(CMD_GET_OPERATE_MODE, None, None)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_OPERATE_MODE]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_OPERATE_MODE, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_operate_mode ACK")
             logger.debug(f"operate_mode: {self.operate_mode}")
@@ -1106,6 +1589,7 @@ class SmartUSBHub:
             self.operate_mode = None
             logger.warning("get_operate_mode No ACK!")
             return None
+
     @synchronized
     def set_channel_power(self, *channels, state):
         """
@@ -1118,15 +1602,16 @@ class SmartUSBHub:
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
+        # 发送命令
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
             logger.debug("set_channel_power ACK")
             return True
         else:
             logger.error("set_channel_power No ACK!")
             return False
+
     @synchronized
     def get_channel_power_status(self, *channels):
         """
@@ -1140,19 +1625,33 @@ class SmartUSBHub:
                                  the power state of the single channel if only one channel is queried,
                                  or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_channel_power_status ACK")
-
-            if len(channels) == 1:
-                return self.channel_power_status.get(channels[0], None)
-            logger.debug(f"get_channel_power_status: {self.channel_power_status}")
-            return self.channel_power_status
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        
+        # 如果是多通道查询，需要等待所有ACK都被解析
+        if len(channels) > 1:
+            # 等待第一个ACK到达
+            if ack_event.wait(self.com_timeout):
+                # 即使收到第一个ACK，也要继续等待一小段时间，确保所有ACK都被解析
+                time.sleep(0.05)  # 等待50ms，给其他ACK时间到达并被解析
+                logger.debug("get_channel_power_status ACK")
+                logger.debug(f"get_channel_power_status: {self.channel_power_status}")
+                return self.channel_power_status
+            else:
+                logger.error("get_channel_power_status No ACK!")
+                return None
         else:
-            logger.error("get_channel_power_status No ACK!")
-            return None
+            # 单通道查询，使用原来的逻辑
+            if ack_event.wait(self.com_timeout):  
+                logger.debug("get_channel_power_status ACK")
+                return self.channel_power_status.get(channels[0], None)
+            else:
+                logger.error("get_channel_power_status No ACK!")
+                return None
+
     @synchronized
     def set_channel_power_interlock(self,channel):
         """
@@ -1171,14 +1670,13 @@ class SmartUSBHub:
             channels = [channel]
             self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, channels,1)
 
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER_INTERLOCK]
-        ack_event.clear()
-        if ack_event.wait(timeout=self.com_timeout): 
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER_INTERLOCK):
             logger.debug("set_channel_power_interlock ACK")
             return True
         else:
             logger.error("set_channel_power_interlock No ACK!")
             return False
+
     @synchronized    
     def get_channel_voltage(self, channel):
         """
@@ -1193,15 +1691,19 @@ class SmartUSBHub:
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
 
-        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_voltage ACK")
             return self.channel_voltages.get(channel)
         else:
             logger.error("get_channel_voltage No ACK!")
             return None
+
     @synchronized
     def get_channel_current(self, channel):
         """
@@ -1216,15 +1718,19 @@ class SmartUSBHub:
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
 
-        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CURRENT]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_current ACK")
             return self.channel_currents.get(channel)
         else:
             logger.error("get_channel_current No ACK!")
             return None
+            
     @synchronized
     def set_channel_usb2_dataline(self, *channels, state):
         """
@@ -1236,14 +1742,13 @@ class SmartUSBHub:
             state (int): 1 to enable data line, 0 to disable.
         """
         self._send_packet(CMD_SET_CHANNEL_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_DATALINE):
             logger.debug("set_channel_usb2_dataline ACK")
             return True
         else:
             logger.error("set_channel_usb2_dataline No ACK!")
             return False
+
     @synchronized
     def get_channel_usb2_dataline_status(self, *channels):
         """
@@ -1255,9 +1760,12 @@ class SmartUSBHub:
         Returns:
             dict or None: A dictionary with channel numbers as keys and data line states as values, or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_channel_usb2_dataline_status ACK")
             return self.channel_dataline_status
@@ -1278,14 +1786,13 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
         """
         self._send_packet(CMD_SET_CHANNEL_USB3_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_USB3_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_USB3_DATALINE):
             logger.debug("set_channel_usb3_dataline ACK")
             return True
         else:
             logger.error("set_channel_usb3_dataline No ACK!")
             return False
+
     @synchronized
     def get_channel_usb3_dataline_status(self, *channels):
         """
@@ -1297,137 +1804,222 @@ class SmartUSBHub:
         Returns:
             dict or None: A dictionary with channel numbers as keys and USB3 data line states as values, or None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_channel_usb3_dataline_status ACK")
             return self.channel_usb3_dataline_status
         else:
             logger.error("get_channel_usb3_dataline_status No ACK!")
             return None
+
     @synchronized
-    def set_channel_low_current(self, *channels, state):
-        """ 
-        Enables or disables low-current mode for one or more channels.
+    def set_channel_slow_charge(self, *channels, disconnect_before_switch=False):
+        """
+        Enables slow charge mode for one or more channels.
+        Slow charge mode limits the charging current (enables ilim).
+        
+        **重要**: 慢充模式保持连接的条件是之前电源必须是打开状态。如果通道之前是关闭状态，
+        会先切换到快充模式3秒，然后再切换到慢充模式，以确保数据连接不断开。
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
-            state (int): True to enable low-current mode; False to disable.
+            disconnect_before_switch (bool): If True, disconnect channels for 3 seconds before enabling slow charge.
+                                             Default is False.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
+
+        set_channel_slow_charge(channels)
+        ↓
+        获取当前电源状态
+        ↓
+        ┌─────────────────┬─────────────────┐
+        │  关闭状态         │   已打开状态     │
+        │  (power=0)      │  (power=1)      │
+        ├─────────────────┼─────────────────┤
+        │ 1. 打开电源       │ 1. 如果disconnect│
+        │ 2. 设置为快充     │    =True，断开3秒│
+        │ 3. 等待3秒       │                 │
+        │ 4. 切换到慢充     │ 2. 切换到慢充   │
+        └─────────────────┴─────────────────┘
+
         """
-        self._send_packet(CMD_SET_CHANNEL_LOW_CURRENT, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_LOW_CURRENT]
+        channels_list = list(channels)
+        
+        # 先获取当前状态（直接发送命令，避免调用@synchronized方法导致死锁）
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
         ack_event.clear()
+        # 然后发送命令
+        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, tuple(channels_list))
         if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_low_current ACK")
+            logger.debug("get_channel_power_status ACK")
+            power_status_dict = {}
+            for ch in channels_list:
+                status = self.channel_power_status.get(ch, 0)
+                power_status_dict[ch] = status
+            logger.debug(f"Power status retrieved: {power_status_dict}")
+        else:
+            logger.warning(f"Failed to get power status within {self.com_timeout}s timeout. "
+                         f"Will try to read cached status or assume channels are off.")
+            # 尝试使用缓存的状态（如果之前查询过）
+            power_status_dict = {}
+            for ch in channels_list:
+                # 优先使用缓存的状态，如果没有则假设为关闭
+                cached_status = self.channel_power_status.get(ch)
+                if cached_status is not None:
+                    power_status_dict[ch] = cached_status
+                    logger.debug(f"Using cached power status for channel {ch}: {cached_status}")
+                else:
+                    power_status_dict[ch] = 0
+                    logger.warning(f"No cached status for channel {ch}, assuming it's off")
+        
+        # 检查每个通道的当前状态
+        need_fast_charge_first = []
+        channels_already_on = []
+        
+        for channel in channels_list:
+            # 检查电源状态
+            power_status = power_status_dict.get(channel, 0)
+            
+            # 如果电源是关闭状态，需要先切换到快充模式
+            if power_status == 0:
+                need_fast_charge_first.append(channel)
+                logger.debug(f"Channel {channel} is currently off, will enable fast charge first")
+            else:
+                channels_already_on.append(channel)
+                logger.debug(f"Channel {channel} is already on")
+        
+        # 如果有通道需要先切换到快充模式（从关闭状态）
+        if need_fast_charge_first:
+            logger.debug(f"Channels {need_fast_charge_first} are off, enabling fast charge mode first for 3 seconds")
+            # 先打开电源并设置为快充模式 (先建立数据连接)
+            self._send_packet(CMD_SET_CHANNEL_POWER, tuple(need_fast_charge_first), 1)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                # 等待电源稳定
+                time.sleep(0.1)
+                # 设置为快充模式
+                self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, tuple(need_fast_charge_first), 1)
+                if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_FAST_CHARGE):
+                    logger.debug(f"Fast charge enabled for channels {need_fast_charge_first}, waiting 3 seconds")
+                    time.sleep(3.0)
+                else:
+                    logger.warning(f"Failed to enable fast charge for channels {need_fast_charge_first}. "
+                                 f"Power is on but fast charge mode failed. Will continue to slow charge mode.")
+                    # 即使快充模式设置失败，电源已经打开，仍然可以尝试切换到慢充模式
+                    # 但可能无法保证数据连接不断开
+            else:
+                logger.warning(f"Failed to power on channels {need_fast_charge_first}. "
+                             f"Cannot proceed to slow charge mode.")
+                # 如果电源打开失败，无法继续执行慢充模式切换
+                return False
+        
+        # 如果需要断开连接再切换（对于已经是打开状态的通道：快充或慢充）
+        if disconnect_before_switch and channels_already_on:
+            logger.debug(f"Disconnecting channels {channels_already_on} before setting slow charge mode")
+            self._send_packet(CMD_SET_CHANNEL_POWER, tuple(channels_already_on), 0)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                time.sleep(3.0)
+            else:
+                logger.warning("Failed to disconnect channels before slow charge")
+
+        # 切换到慢充模式
+        # 检查上一个相关命令是否完成（避免在设备还在处理时发送新命令）
+        # 检查快充命令是否完成，如果未完成则等待
+        fast_charge_event = self.ack_events[CMD_SET_CHANNEL_FAST_CHARGE]
+        if not fast_charge_event.is_set():
+            logger.debug("Previous fast charge command not completed, waiting...")
+            # 等待上一个命令完成，最多等待3秒（因为断开操作需要3秒）
+            if not fast_charge_event.wait(3.1):
+                logger.warning("Previous fast charge command timeout, proceeding anyway...")
+        
+        # 发送命令
+        self._send_packet(CMD_SET_CHANNEL_SLOW_CHARGE, channels, 1)
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_SLOW_CHARGE):
+            logger.debug("set_channel_slow_charge ACK")
             return True
         else:
-            logger.error("set_channel_low_current No ACK!")
+            logger.error("set_channel_slow_charge No ACK!")
             return False
+
     @synchronized
-    def get_channel_low_current_status(self, *channels):
+    def set_channel_fast_charge(self, *channels, disconnect_before_switch=True):
         """
-        Requests low-current mode status for specified channels.
-
-        Args:
-            *channels (int): Channels to query.
-
-        Returns:
-            dict or None: A dictionary with channel numbers as keys and low-current states as values, or None if timed out.
-        """
-        self._send_packet(CMD_GET_CHANNEL_LOW_CURRENT, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_LOW_CURRENT]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_low_current_status ACK")
-            return self.channel_low_current_status
-        else:
-            logger.error("get_channel_low_current_status No ACK!")
-            return None
-    @synchronized
-    def set_button_control(self, enable: bool):
-        """
-        Sends a command to set the USB3 data line state of specific channels.
-
-        Args:
-            enable (bool): True to enable buttons, False to disable.
-
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
-        """
-        self._send_packet(CMD_SET_CHANNEL_USB3_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_USB3_DATALINE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_usb3_dataline ACK")
-            return True
-        else:
-            logger.error("set_channel_usb3_dataline No ACK!")
-            return False
-    @synchronized
-    def get_channel_usb3_dataline_status(self, *channels):
-        """
-        Requests the USB3 data line status for specified channels.
-
-        Args:
-            *channels (int): Channels to query.
-
-        Returns:
-            dict or None: A dictionary with channel numbers as keys and USB3 data line states as values, or None if timed out.
-        """
-        self._send_packet(CMD_GET_CHANNEL_USB3_DATALINE_STATUS, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_USB3_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_usb3_dataline_status ACK")
-            return self.channel_usb3_dataline_status
-        else:
-            logger.error("get_channel_usb3_dataline_status No ACK!")
-            return None
-    @synchronized
-    def set_channel_low_current(self, *channels, state):
-        """ 
-        Enables or disables low-current mode for one or more channels.
+        Enables fast charge mode for one or more channels.
+        Fast charge mode provides full power (disables ilim, enables VBUS).
 
         Args:
             *channels (int): Channel numbers (1-4) to be updated.
-            state (int): True to enable low-current mode; False to disable.
+            disconnect_before_switch (bool): If True, disconnect channels for 1 second before enabling fast charge.
+                                            Default is True.
 
         Returns:
             bool: True if command was acknowledged, False otherwise.
         """
-        self._send_packet(CMD_SET_CHANNEL_LOW_CURRENT, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_LOW_CURRENT]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_channel_low_current ACK")
+        if disconnect_before_switch:
+            logger.debug(f"Disconnecting channels {channels} before setting fast charge mode")
+            self._send_packet(CMD_SET_CHANNEL_POWER, channels, 0)
+            if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
+                time.sleep(3.0)
+            else:
+                logger.warning("Failed to disconnect channels before fast charge")
+
+        # 检查上一个相关命令是否完成（避免在设备还在处理时发送新命令）
+        # 检查慢充命令是否完成，如果未完成则等待
+        slow_charge_event = self.ack_events[CMD_SET_CHANNEL_SLOW_CHARGE]
+        if not slow_charge_event.is_set():
+            logger.debug("Previous slow charge command not completed, waiting...")
+            # 等待上一个命令完成，最多等待3秒（因为断开操作需要3秒）
+            if not slow_charge_event.wait(3.1):
+                logger.warning("Previous slow charge command timeout, proceeding anyway...")
+        
+        # 发送命令
+        self._send_packet(CMD_SET_CHANNEL_FAST_CHARGE, channels, 1)
+        # 等待ACK（_wait_for_ack_with_recovery 内部会处理残留ACK的情况）
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_FAST_CHARGE):
+            logger.debug("set_channel_fast_charge ACK")
             return True
         else:
-            logger.error("set_channel_low_current No ACK!")
+            logger.error("set_channel_fast_charge No ACK!")
             return False
+
     @synchronized
-    def get_channel_low_current_status(self, *channels):
+    def get_channel_charge_mode(self, *channels):
         """
-        Requests low-current mode status for specified channels.
+        Requests the charge mode for specified channels.
 
         Args:
             *channels (int): Channels to query.
 
         Returns:
-            dict or None: A dictionary with channel numbers as keys and low-current states as values, or None if timed out.
+            dict or None: A dictionary with channel numbers as keys and charge modes as values.
+                          Charge mode values: 0=off, 1=fast_charge, 2=slow_charge.
+                          Returns None if timed out.
         """
-        self._send_packet(CMD_GET_CHANNEL_LOW_CURRENT, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_LOW_CURRENT]
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_low_current_status ACK")
-            return self.channel_low_current_status
+            logger.debug("get_channel_charge_mode ACK")
+            result = {}
+            for ch in channels:
+                mode = self.channel_charge_modes.get(ch)
+                if mode is not None:
+                    result[ch] = mode
+            return result if result else None
         else:
-            logger.error("get_channel_low_current_status No ACK!")
+            logger.error("get_channel_charge_mode No ACK!")
             return None
+
     @synchronized
     def set_button_control(self, enable: bool):
         """
@@ -1442,14 +2034,13 @@ class SmartUSBHub:
         data_val = 1 if enable else 0
 
         self._send_packet(CMD_SET_BUTTON_CONTROL, None, data_val)
-        ack_event = self.ack_events[CMD_SET_BUTTON_CONTROL]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_BUTTON_CONTROL):
             logger.debug("set_button_control ACK")
             return True
         else:
             logger.error("set_button_control No ACK!")
             return False
+
     @synchronized
     def get_button_control_status(self):
         """
@@ -1458,15 +2049,19 @@ class SmartUSBHub:
         Returns:
             int or None: 1 if enabled, 0 if disabled, or None if no response.
         """
-        self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_BUTTON_CONTROL_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_button_control_status ACK")
             return self.button_control_status
         else:
             logger.error("get_button_control_status No ACK!")
             return None
+
     @synchronized
     def set_default_power_status(self,*channels,enable,status=None):
         """
@@ -1483,14 +2078,13 @@ class SmartUSBHub:
         if status is None:
             status = 0
         self._send_packet(CMD_SET_DEFAULT_POWER_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_POWER_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_POWER_STATUS):
             logger.debug("set_default_power_status ACK")
             return True
         else:
             logger.error("set_default_power_status No ACK!")
             return False
+
     @synchronized
     def get_default_power_status(self,*channels):
         """
@@ -1502,9 +2096,12 @@ class SmartUSBHub:
         Returns:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
-        self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels,[0,0])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_DEFAULT_POWER_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels,[0,0])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_default_power_status ACK")
             result = {}
@@ -1521,6 +2118,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_power_status No ACK!")
             return None
+
     @synchronized
     def set_default_dataline_status(self,*channels,enable,status=None):
         """
@@ -1537,14 +2135,13 @@ class SmartUSBHub:
         if status is None:
             status = 0
         self._send_packet(CMD_SET_DEFAULT_DATALINE_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_DATALINE_STATUS):
             logger.debug("set_default_dataline_status ACK")
             return True
         else:
             logger.error("set_default_dataline_status No ACK!")
             return False
+
     @synchronized
     def get_default_dataline_status(self,*channels):
         """
@@ -1556,9 +2153,12 @@ class SmartUSBHub:
         Returns:
             dict or None: Dictionary with enabled status and default value per channel, or None if no response.
         """
-        self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels,[0,0])
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_DEFAULT_DATALINE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels,[0,0])
+        # 等待ACK
         if ack_event.wait(self.com_timeout):  
             logger.debug("get_default_dataline_status ACK")
             result = {}
@@ -1575,6 +2175,7 @@ class SmartUSBHub:
         else:
             logger.error("get_default_dataline_status No ACK!")
             return None
+
     @synchronized    
     def set_auto_restore(self,enable:bool):
         """
@@ -1589,14 +2190,13 @@ class SmartUSBHub:
         data_val = 1 if enable else 0
 
         self._send_packet(CMD_SET_AUTO_RESTORE, None, data_val)
-        ack_event = self.ack_events[CMD_SET_AUTO_RESTORE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
+        if self._wait_for_ack_with_recovery(CMD_SET_AUTO_RESTORE):
             logger.debug("set_auto_restore ACK")
             return True
         else:
             logger.error("set_auto_restore No ACK!")
             return False
+
     @synchronized
     def get_auto_restore_status(self):
         """
@@ -1605,15 +2205,19 @@ class SmartUSBHub:
         Returns:
             int or None: 1 if auto-restore is enabled, 0 if disabled, or None if no response.
         """
-        self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_AUTO_RESTORE_STATUS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_auto_restore_status ACK")
             return self.auto_restore_status
         else:
             logger.error("get_auto_restore_status No ACK!")
             return None
+
     @synchronized
     def set_device_address(self, address: int):
         """
@@ -1639,6 +2243,7 @@ class SmartUSBHub:
         else:
             logger.error("set_device_address No ACK!")
             return False
+
     @synchronized
     def get_device_address(self):
         """
@@ -1647,16 +2252,53 @@ class SmartUSBHub:
         Returns:
             16-bit device address or None if no response.
         """
-        self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
-
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_DEVICE_ADDRESS]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_device_address ACK")
             return self.device_address
         else:
             logger.error("get_device_address No ACK!")
-            return None        
+            return None
+
+    @synchronized
+    def reboot_mcu(self):
+        """
+        Sends a command to reboot the MCU.
+        
+        Note: After sending the reboot command, the MCU will reboot in approximately 100ms.
+        The connection will be lost after reboot. You may need to reconnect after the device
+        restarts.
+    
+        Returns:
+            bool: True if the reboot command was acknowledged; False otherwise.
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_REBOOT_MCU]
+        ack_event.clear()
+        # 等待一小段时间，让可能的残留ACK到达
+        time.sleep(0.001)
+        # 如果已经有残留ACK，直接返回成功
+        if ack_event.is_set():
+            ack_event.clear()
+            logger.debug("reboot_mcu ACK (residual)")
+            return True
+        
+        # 发送命令
+        self._send_packet(CMD_REBOOT_MCU, None, None)
+        # 等待ACK，使用更长的超时时间（200ms），因为MCU会在发送ACK后延迟100ms才重启
+        # 这样可以确保有足够时间接收ACK
+        if ack_event.wait(0.2):  # 200ms 超时
+            logger.debug("reboot_mcu ACK")
+            return True
+        else:
+            logger.error("reboot_mcu No ACK!")
+            return False
+
     @synchronized
     def factory_reset(self):
         """
@@ -1674,6 +2316,7 @@ class SmartUSBHub:
         else:
             logger.error("factory_reset No ACK!")
             return False
+
     @synchronized
     def get_firmware_version(self):
         """
@@ -1682,15 +2325,19 @@ class SmartUSBHub:
         Returns:
             int or None: The firmware version, or None if no response.
         """
-        self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_FIRMWARE_VERSION]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_firmware_version ACK")
             return self.firmware_version
         else:
             logger.error("get_firmware_version No ACK!")
             return None
+
     @synchronized
     def get_hardware_version(self):
         """
@@ -1699,9 +2346,12 @@ class SmartUSBHub:
         Returns:
             int or None: The hardware version, or None if no response.
         """
-        self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
+        # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_HARDWARE_VERSION]
         ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
+        # 等待ACK
         if ack_event.wait(self.com_timeout):
             logger.debug("get_hardware_version ACK")
             return self.hardware_version

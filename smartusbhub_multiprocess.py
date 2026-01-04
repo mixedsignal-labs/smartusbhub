@@ -29,8 +29,9 @@ REQUEST_TYPE_SET_CHANNEL_USB3_DATALINE = 'set_channel_usb3_dataline'
 REQUEST_TYPE_GET_CHANNEL_USB3_DATALINE_STATUS = 'get_channel_usb3_dataline_status'
 REQUEST_TYPE_GET_CHANNEL_VOLTAGE = 'get_channel_voltage'
 REQUEST_TYPE_GET_CHANNEL_CURRENT = 'get_channel_current'
-REQUEST_TYPE_SET_CHANNEL_LOW_CURRENT = 'set_channel_low_current'
-REQUEST_TYPE_GET_CHANNEL_LOW_CURRENT_STATUS = 'get_channel_low_current_status'
+REQUEST_TYPE_SET_CHANNEL_SLOW_CHARGE = 'set_channel_slow_charge'
+REQUEST_TYPE_SET_CHANNEL_FAST_CHARGE = 'set_channel_fast_charge'
+REQUEST_TYPE_GET_CHANNEL_CHARGE_MODE = 'get_channel_charge_mode'
 REQUEST_TYPE_SHUTDOWN = 'shutdown'
 
 
@@ -179,20 +180,40 @@ class SmartUSBHubClient:
             print(f"[Client] get_channel_current 失败: {e}")
             return None
     
-    def set_channel_low_current(self, *channels, state):
-        """设置通道低电流模式"""
+    def set_channel_slow_charge(self, *channels, disconnect_before_switch=False):
+        """
+        设置通道慢充模式（限流）
+        
+        Args:
+            *channels: 通道号
+            disconnect_before_switch: 如果为True，在启用慢充前断开通道3秒。默认为True。
+        """
         try:
-            return self._send_request('set_channel_low_current', args=channels, kwargs={'state': state})
+            return self._send_request('set_channel_slow_charge', args=channels, kwargs={'disconnect_before_switch': disconnect_before_switch})
         except Exception as e:
-            print(f"[Client] set_channel_low_current 失败: {e}")
+            print(f"[Client] set_channel_slow_charge 失败: {e}")
             return False
     
-    def get_channel_low_current_status(self, *channels):
-        """获取通道低电流模式状态"""
+    def set_channel_fast_charge(self, *channels, disconnect_before_switch=True):
+        """
+        设置通道快充模式（全功率）
+        
+        Args:
+            *channels: 通道号
+            disconnect_before_switch: 如果为True，在启用快充前断开通道1秒。默认为True。
+        """
         try:
-            return self._send_request('get_channel_low_current_status', args=channels)
+            return self._send_request('set_channel_fast_charge', args=channels, kwargs={'disconnect_before_switch': disconnect_before_switch})
         except Exception as e:
-            print(f"[Client] get_channel_low_current_status 失败: {e}")
+            print(f"[Client] set_channel_fast_charge 失败: {e}")
+            return False
+    
+    def get_channel_charge_mode(self, *channels):
+        """获取通道充电模式状态"""
+        try:
+            return self._send_request('get_channel_charge_mode', args=channels)
+        except Exception as e:
+            print(f"[Client] get_channel_charge_mode 失败: {e}")
             return None
     
     def shutdown(self):
@@ -313,10 +334,12 @@ class SmartUSBHubServer:
                 result = self.hub.get_channel_voltage(*args)
             elif request_type == REQUEST_TYPE_GET_CHANNEL_CURRENT:
                 result = self.hub.get_channel_current(*args)
-            elif request_type == REQUEST_TYPE_SET_CHANNEL_LOW_CURRENT:
-                result = self.hub.set_channel_low_current(*args, **kwargs)
-            elif request_type == REQUEST_TYPE_GET_CHANNEL_LOW_CURRENT_STATUS:
-                result = self.hub.get_channel_low_current_status(*args)
+            elif request_type == REQUEST_TYPE_SET_CHANNEL_SLOW_CHARGE:
+                result = self.hub.set_channel_slow_charge(*args, **kwargs)
+            elif request_type == REQUEST_TYPE_SET_CHANNEL_FAST_CHARGE:
+                result = self.hub.set_channel_fast_charge(*args, **kwargs)
+            elif request_type == REQUEST_TYPE_GET_CHANNEL_CHARGE_MODE:
+                result = self.hub.get_channel_charge_mode(*args)
             elif request_type == REQUEST_TYPE_SHUTDOWN:
                 self.running = False
                 result = True
@@ -378,8 +401,9 @@ __all__ = [
     'REQUEST_TYPE_GET_CHANNEL_USB3_DATALINE_STATUS',
     'REQUEST_TYPE_GET_CHANNEL_VOLTAGE',
     'REQUEST_TYPE_GET_CHANNEL_CURRENT',
-    'REQUEST_TYPE_SET_CHANNEL_LOW_CURRENT',
-    'REQUEST_TYPE_GET_CHANNEL_LOW_CURRENT_STATUS',
+    'REQUEST_TYPE_SET_CHANNEL_SLOW_CHARGE',
+    'REQUEST_TYPE_SET_CHANNEL_FAST_CHARGE',
+    'REQUEST_TYPE_GET_CHANNEL_CHARGE_MODE',
     'REQUEST_TYPE_SHUTDOWN',
 ]
 

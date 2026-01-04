@@ -6,8 +6,14 @@
 # email:embeddedtec@outlook.com
 
 import sys
+import os
 import time
-sys.path.append('../')
+# 添加项目根目录到路径，以便导入smartusbhub模块
+# 这样可以从任何目录运行脚本
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 from smartusbhub import SmartUSBHub
 
 def main():
@@ -23,8 +29,16 @@ def main():
 
     device_info = hub.get_device_info()
     print("device info:", device_info)
-    # Press Enter to toggle between full-speed charging (normal ILIM) and low-current mode.
-    mode = "HIGH_POWER"  # or "LOW_CURRENT"
+    
+    # 获取并显示硬件和固件版本
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    print()
+    
+    # Press Enter to toggle between fast charge and slow charge mode.
+    mode = "FAST_CHARGE"  # or "SLOW_CHARGE"
 
     print("\nInteractive battery test demo")
     print("- Press Enter to toggle mode")
@@ -38,20 +52,27 @@ def main():
                 break
 
             # Toggle mode
-            if mode == "HIGH_POWER":
-                mode = "LOW_CURRENT"
-                print("-> Switching to LOW_CURRENT (ilim mode)")
+            if mode == "FAST_CHARGE":
+                mode = "SLOW_CHARGE"
+                print("-> Switching to SLOW_CHARGE (ilim mode)")
 
-                # Ensure VBUS is on, then enable low-current mode
-                hub.set_channel_low_current(1, 2, 3, 4, state=1)
+                # Enable slow charge mode (limits charging current)
+                hub.set_channel_slow_charge(1,2,3,4, disconnect_before_switch=False)
             else:
-                mode = "HIGH_POWER"
-                print("-> Switching to HIGH_POWER (full-speed charging)")
+                mode = "FAST_CHARGE"
+                print("-> Switching to FAST_CHARGE (full-speed charging)")
 
-                # Disable low-current mode, keep VBUS on
-                hub.set_channel_power(1, 2, 3, 4, state=1)
+                # Enable fast charge mode (full power)
+                hub.set_channel_fast_charge(1,2,3,4)
 
             print(f"[STATE] mode={mode}")
+            
+            # Get and display charge mode status
+            charge_modes = hub.get_channel_charge_mode(1)
+            if charge_modes:
+                for ch, mode_val in charge_modes.items():
+                    mode_str = "off" if mode_val == 0 else ("fast_charge" if mode_val == 1 else "slow_charge")
+                    print(f"  Channel {ch}: {mode_str} ({mode_val})")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

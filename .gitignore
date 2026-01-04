@@ -15,3 +15,5 @@ dist
 app
 dist
 *.egg-info
+out
+document

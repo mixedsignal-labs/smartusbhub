@@ -1,0 +1,59 @@
+@startuml
+title GET 方法通用流程图
+
+skinparam activity {
+    BackgroundColor #E8F5E9
+    BorderColor #2E7D32
+    FontColor #000000
+    FontSize 12
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #FFC107
+}
+
+start
+:调用 GET 方法\n例如: get_channel_power_status(channels);
+note right: 所有 GET 方法都遵循\n相同的执行流程
+
+:获取 ack_event\nack_event = ack_events[CMD_XXX];
+:清除事件\nack_event.clear();
+note right: 先清除事件，避免之前\n残留的 ACK 影响
+
+:发送命令\n_send_packet(CMD_XXX, ...);
+note right: 命令通过串口发送到 MCU\n请求查询数据
+
+:等待 ACK\nack_event.wait(com_timeout);
+note right: 等待 MCU 返回 ACK 和数据\n超时时间: com_timeout (默认 0.1秒)
+
+if (收到 ACK?) then (是)
+    :记录调试日志\n"get_xxx ACK";
+    
+    partition "处理返回数据" {
+        if (查询单个通道?) then (是)
+            :从缓存字典读取单个值\n例如: channel_power_status.get(channel);
+            :返回单个值;
+        else (否 - 多个通道)
+            :从缓存字典读取所有值\n例如: channel_power_status;
+            :返回字典;
+        endif
+    }
+    
+    :返回数据;
+    stop
+else (否 - 超时)
+    :记录错误日志\n"get_xxx No ACK!";
+    :返回 None;
+    stop
+endif
+
+note bottom
+**GET 方法特点:**
+1. 先清除事件，确保等待新的 ACK
+2. 数据由 _uart_recv_task 后台线程接收并更新到缓存字典
+3. GET 方法从缓存字典读取数据返回
+end note
+
+@enduml
+

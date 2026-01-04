@@ -6,8 +6,14 @@
 # email:embeddedtec@outlook.com
 
 import sys
+import os
 import time
-sys.path.append('../')
+# 添加项目根目录到路径，以便导入smartusbhub模块
+# 这样可以从任何目录运行脚本
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 from smartusbhub import SmartUSBHub
 
 def main():
@@ -19,6 +25,13 @@ def main():
 
     device_info = hub.get_device_info()
     print("device info:", device_info)
+    
+    # 获取并显示硬件和固件版本
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    print()
     
     print("Starting setting example...")
 
