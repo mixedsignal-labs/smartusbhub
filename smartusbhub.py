@@ -418,13 +418,12 @@ class SmartUSBHub:
         lock_file_path = os.path.join(cls._get_lock_dir(), f'{safe_port_name}.lock')
         
         try:
-            # 打开锁文件（如果不存在则创建）
-            lock_file = open(lock_file_path, 'w')
-            
             # 尝试获取文件锁（非阻塞）
             if HAS_FCNTL:
                 # Unix/Linux/macOS 使用 fcntl
                 try:
+                    # 打开锁文件（如果不存在则创建）
+                    lock_file = open(lock_file_path, 'w')
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     cls._port_locks[port] = lock_file
                     # 写入当前进程ID，便于调试
@@ -434,29 +433,51 @@ class SmartUSBHub:
                     return True
                 except (IOError, OSError):
                     # 锁已被其他进程持有
-                    lock_file.close()
+                    if 'lock_file' in locals():
+                        lock_file.close()
                     logger.warning(f"Port {port} is locked by another process")
                     return False
             elif HAS_MSVCRT:
-                # Windows 使用 msvcrt
+                # Windows 使用 msvcrt.locking
+                # 注意：msvcrt.locking需要以二进制模式打开文件，并锁定特定字节
                 try:
+                    # 以二进制读写模式打开文件
+                    lock_file = open(lock_file_path, 'r+b')
+                    # 如果文件为空，先写入一个字节
+                    try:
+                        lock_file.seek(0, 2)  # 移动到文件末尾
+                        if lock_file.tell() == 0:
+                            lock_file.write(b'0')
+                            lock_file.flush()
+                    except:
+                        pass
+                    # 锁定文件的第一个字节（非阻塞）
+                    lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                     cls._port_locks[port] = lock_file
-                    lock_file.write(str(os.getpid()))
+                    # 写入当前进程ID
+                    lock_file.seek(0)
+                    lock_file.write(str(os.getpid()).encode())
                     lock_file.flush()
                     logger.debug(f"Acquired file lock for port {port}")
                     return True
                 except IOError:
-                    lock_file.close()
+                    # 锁已被其他进程持有
+                    if 'lock_file' in locals():
+                        lock_file.close()
                     logger.warning(f"Port {port} is locked by another process")
                     return False
             else:
                 # 不支持文件锁的系统，回退到进程内检查
                 logger.warning("File locking not supported on this system, falling back to process-level check")
-                lock_file.close()
                 return True
         except Exception as e:
             logger.error(f"Failed to acquire lock for port {port}: {e}")
+            if 'lock_file' in locals():
+                try:
+                    lock_file.close()
+                except:
+                    pass
             return False
     
     @classmethod
@@ -475,14 +496,13 @@ class SmartUSBHub:
             if HAS_FCNTL:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             elif HAS_MSVCRT:
+                # Windows: 解锁文件的第一个字节
+                lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             lock_file.close()
             logger.debug(f"Released file lock for port {port}")
         except Exception as e:
             logger.error(f"Failed to release lock for port {port}: {e}")
-    # 跨进程文件锁字典 {port: lock_file_handle}
-    _port_locks = {}
-    _lock_dir = None  # 锁文件目录
 
     def __init__(self, port):
         """
