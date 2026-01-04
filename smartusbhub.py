@@ -2592,7 +2592,8 @@ class SmartUSBHub:
             logger.debug("get_product_type ACK")
             return self.product_type
         else:
-            logger.error("get_product_type No ACK!")
+            # 旧固件不支持此功能，使用debug级别而不是error
+            logger.debug("get_product_type No ACK (可能是不支持此功能的旧固件)")
             return None
 
     @synchronized
@@ -2641,7 +2642,8 @@ class SmartUSBHub:
             logger.debug("get_max_channels ACK")
             return self.max_channels
         else:
-            logger.error("get_max_channels No ACK!")
+            # 旧固件不支持此功能，使用debug级别而不是error
+            logger.debug("get_max_channels No ACK (可能是不支持此功能的旧固件)")
             return None
 
     @synchronized

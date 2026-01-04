@@ -43,7 +43,7 @@ def hub():
     if hub is None:
         pytest.skip("未找到设备，跳过测试")
     
-    logger.info(f"✓ 设备连接成功: {hub.port if hasattr(hub, 'port') else 'N/A'}")
+    logger.info(f"[OK] 设备连接成功: {hub.port if hasattr(hub, 'port') else 'N/A'}")
     time.sleep(0.5)  # 等待连接稳定
     
     yield hub
@@ -63,16 +63,16 @@ def hub():
         logger.info("正在恢复出厂设置...")
         result = hub.factory_reset()
         if result:
-            logger.info("✓ 设备已恢复出厂设置")
+            logger.info("[OK] 设备已恢复出厂设置")
             time.sleep(0.5)  # 等待设备重置完成
         else:
-            logger.warning("⚠ 恢复出厂设置失败")
+            logger.warning("[WARNING] 恢复出厂设置失败")
     except Exception as e:
-        logger.warning(f"⚠ 恢复出厂设置时出错: {e}")
+        logger.warning(f"[WARNING] 恢复出厂设置时出错: {e}")
     
     try:
         hub.disconnect()
-        logger.info("✓ 设备已断开连接")
+        logger.info("[OK] 设备已断开连接")
     except:
         pass
     

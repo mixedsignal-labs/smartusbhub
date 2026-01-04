@@ -4,3 +4,5 @@ pyserial
 PyQt5
 PyQt5_sip
 pyqtgraph
+pytest
+pytest-html
