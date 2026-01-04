@@ -285,6 +285,7 @@ CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
 CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
 CMD_REBOOT_MCU                      = 0xF7
+CMD_GET_SERIAL_NO                   = 0xF9
 CMD_GET_PRODUCT_TYPE                = 0xF0
 CMD_FACTORY_RESET                   = 0xFC   
 CMD_GET_FIRMWARE_VERSION            = 0xFD
@@ -519,6 +520,7 @@ class SmartUSBHub:
             CMD_GET_DEVICE_ADDRESS: threading.Event(),
             CMD_REBOOT_MCU: threading.Event(),
             CMD_GET_PRODUCT_TYPE: threading.Event(),
+            CMD_GET_SERIAL_NO: threading.Event(),
             CMD_FACTORY_RESET:threading.Event(),
             CMD_GET_FIRMWARE_VERSION: threading.Event(),
             CMD_GET_HARDWARE_VERSION: threading.Event(),
@@ -542,6 +544,7 @@ class SmartUSBHub:
         self.hardware_version = None
         self.firmware_version = None
         self.product_type = None
+        self.serial_no = None
         self.operate_mode = None
         self.auto_restore_status = None
         self.button_control_status = None
@@ -768,15 +771,37 @@ class SmartUSBHub:
             self.ser.close()
         sys.exit(0)
 
+    def _cal_crc16(self, data):
+        """
+        Calculate CRC16 (polynomial: 0x8005, initial: 0xFFFF)
+        
+        Args:
+            data (bytes): Data to calculate CRC16 for
+            
+        Returns:
+            int: CRC16 value
+        """
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0x8005
+                else:
+                    crc = crc >> 1
+        return crc & 0xFFFF
+
     def _parse_protocol_frame(self, data):
         """
         Processes a raw data frame from the device and delivers it to the correct handler.
+        Supports V1, V2, and V3 protocols.
 
         Args:
             data (bytes): Raw bytes read from the device.
 
         Returns:
             tuple or None: Parsed command, channel, value, and length if valid, otherwise None.
+            For V3 protocol: returns (cmd, 0, data_string, total_length)
         """
 
         # logger.debug(f"Received data: {data.hex()}")
@@ -784,6 +809,38 @@ class SmartUSBHub:
         if len(data) < 6:
             return None
 
+        # Check for V3 protocol (0x55 0xAB)
+        if data[0] == 0x55 and data[1] == 0xAB:
+            # V3 protocol format: [0x55, 0xAB, CRC16(2), cmd(2), length(2), data...]
+            if len(data) < 8:  # Minimum header size
+                return None
+            
+            # Read CRC16, cmd, and length (all little-endian)
+            received_crc16 = data[2] | (data[3] << 8)
+            cmd = data[4] | (data[5] << 8)
+            data_length = data[6] | (data[7] << 8)
+            
+            # Check if we have enough data
+            total_length = 8 + data_length
+            if len(data) < total_length:
+                return None
+            
+            # Calculate CRC16 for: cmd(2) + length(2) + data(data_length)
+            crc_data = data[4:4+2+2+data_length]  # cmd + length + data
+            calculated_crc16 = self._cal_crc16(crc_data)
+            
+            if calculated_crc16 != received_crc16:
+                logger.debug(f"Invalid CRC16 for V3 protocol: calculated={calculated_crc16:04X}, received={received_crc16:04X}")
+                return None
+            
+            # Extract data as string
+            data_bytes = data[8:8+data_length]
+            data_string = data_bytes.decode('utf-8', errors='ignore')
+            
+            logger.debug(f"Received V3 protocol: cmd={cmd:04X}, length={data_length}, data={data_string}")
+            return (cmd, 0, data_string, total_length)
+        
+        # V1/V2 protocol (0x55 0x5A)
         if data[0] != 0x55 or data[1] != 0x5A:
             return None
 
@@ -826,7 +883,9 @@ class SmartUSBHub:
                 if self.ser is not None and self.ser.in_waiting > 0:
                     buffer.extend(self.ser.read(self.ser.in_waiting))
                     logger.debug(f"rx data: {buffer.hex()}")
-                    while len(buffer) >= 6:
+                    # Check for V3 protocol minimum size (8 bytes) or V1/V2 (6 bytes)
+                    min_size = 8 if len(buffer) >= 8 and buffer[0] == 0x55 and buffer[1] == 0xAB else 6
+                    while len(buffer) >= min_size:
                         result = self._parse_protocol_frame(buffer)
                         if result is not None:
                             cmd, channel, value, length = result
@@ -891,6 +950,8 @@ class SmartUSBHub:
                                 self._handle_hardware_version(value)
                             elif cmd == CMD_GET_PRODUCT_TYPE:
                                 self._handle_product_type(value)
+                            elif cmd == CMD_GET_SERIAL_NO:
+                                self._handle_serial_no(value)
                             if cmd in self.ack_events:
                                 self._invoke_callback(cmd,channel,value)
                                 self.ack_events[cmd].set()
@@ -1290,6 +1351,14 @@ class SmartUSBHub:
         logger.debug("_handle_product_type ACK")
         self.product_type = value
 
+    def _handle_serial_no(self, value):
+        logger.debug("_handle_serial_no ACK")
+        # value is a string for V3 protocol
+        if isinstance(value, str):
+            self.serial_no = value
+        else:
+            self.serial_no = None
+
     def _handle_set_auto_restore(self):
         logger.debug("_handle_set_auto_restore ACK")
 
@@ -1349,6 +1418,7 @@ class SmartUSBHub:
         self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
         self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
         self.product_type = self._retry_get_info(self.get_product_type, "product_type")
+        self.serial_no = self._retry_get_info(self.get_serial_no, "serial_no")
         self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
         self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
         self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
@@ -1379,6 +1449,7 @@ class SmartUSBHub:
             "hardware_version": self.hardware_version,
             "firmware_version": self.firmware_version,
             "product_type": product_type_name,
+            "serial_no": self.serial_no if self.serial_no else "N/A",
             "operate_mode": "normal" if self.operate_mode == 0 else "interlock" if self.operate_mode == 1 else "N/A",
             "auto_restore": "enabled" if self.auto_restore_status == 1 else "disabled",
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
@@ -1393,6 +1464,8 @@ class SmartUSBHub:
             logger.warning("Failed to get firmware_version after retries")
         if self.product_type is None:
             logger.warning("Failed to get product_type after retries")
+        if self.serial_no is None:
+            logger.warning("Failed to get serial_no after retries")
             
         return hub_info
         
@@ -2232,4 +2305,25 @@ class SmartUSBHub:
             return self.product_type
         else:
             logger.error("get_product_type No ACK!")
+            return None
+
+    @synchronized
+    def get_serial_no(self):
+        """
+        Query the device's serial number (using V3 protocol).
+
+        Returns:
+            str or None: The serial number string (format: "XXXXXXXX-XXXXXXXX-XXXXXXXX"), or None if no response.
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_SERIAL_NO]
+        ack_event.clear()
+        # 发送命令 (V1 protocol for request)
+        self._send_packet(CMD_GET_SERIAL_NO, None, None)
+        # 等待ACK (response will be V3 protocol)
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_serial_no ACK")
+            return self.serial_no
+        else:
+            logger.error("get_serial_no No ACK!")
             return None

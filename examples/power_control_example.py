@@ -34,7 +34,15 @@ def main():
     firmware_version = hub.get_firmware_version()
     print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
     print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
-    print()
+
+    hub.set_channel_usb2_dataline(1,2,3,4, state=1)
+    hub.set_channel_usb3_dataline(1,2,3,4, state=1)
+    print(hub.get_channel_usb2_dataline_status(1,2,3,4))
+    print(hub.get_channel_usb3_dataline_status(1,2,3,4))
+
+    while True:
+        time.sleep(1)
+
 
     interval = 0.01
 
