@@ -64,18 +64,20 @@ if __name__ == '__main__':
     exit_code = pytest.main(test_args)
     
     # 测试完成后，如果报告存在，自动打开（除非指定了 --no-open）
-    if not args.no_open:
-        if os.path.exists(report_path):
-            print(f"\n[OK] HTML报告已生成: {report_path}")
+    if not args.no_open and report_path:
+        report_abs_path = os.path.abspath(report_path)
+        if os.path.exists(report_abs_path):
+            print(f"\n[OK] HTML报告已生成: {report_abs_path}")
             try:
                 import webbrowser
-                webbrowser.open_new_tab(f"file:///{os.path.abspath(report_path)}")
+                # macOS 上需要 file:/// 格式（三个斜杠）
+                webbrowser.open(f"file:///{report_abs_path}")
                 print("[OK] 已在浏览器中打开报告")
             except Exception as e:
                 print(f"[WARNING] 无法自动打开浏览器: {e}")
-                print(f"  请手动打开: {os.path.abspath(report_path)}")
+                print(f"  请手动打开: {report_abs_path}")
         else:
-            print(f"\n[WARNING] 报告文件未找到: {report_path}")
+            print(f"\n[WARNING] 报告文件未找到: {report_abs_path}")
     
     sys.exit(exit_code)
 
