@@ -586,29 +586,54 @@ def test_power_sequence_all_channels(hub, max_channels):
 
 
 def test_get_all_channels_status(hub, max_channels):
-    """测试获取所有通道的状态"""
+    """测试获取所有通道的状态（电源、USB2数据线、USB3数据线）并验证返回值是否齐全"""
     channels = list(range(1, max_channels + 1))
     logger.info(f"测试获取所有通道状态: {channels}...")
     
     # 获取所有通道的电源状态
     power_status = hub.get_channel_power_status(*channels)
+    assert power_status is not None, "电源状态读取失败"
+    assert isinstance(power_status, dict), f"电源状态应该返回字典，实际返回: {type(power_status)}"
+    assert len(power_status) == len(channels), f"电源状态应该包含 {len(channels)} 个通道，实际包含 {len(power_status)} 个"
     logger.info("  电源状态:")
     for ch in channels:
-        status = power_status[ch] if isinstance(power_status, dict) else power_status
+        assert ch in power_status, f"电源状态缺少通道 {ch}"
+        status = power_status[ch]
+        assert status in [0, 1], f"通道 {ch} 电源状态值异常: {status}"
         logger.info(f"    通道 {ch}: {'ON' if status == 1 else 'OFF'}")
+    logger.info(f"  ✓ 电源状态返回值齐全，包含所有 {len(channels)} 个通道")
     
-    # 获取所有通道的数据线状态
+    # 获取所有通道的USB2数据线状态
     try:
         dataline_status = hub.get_channel_usb2_dataline_status(*channels)
-        logger.info("  数据线状态:")
+        assert dataline_status is not None, "USB2数据线状态读取失败"
+        assert isinstance(dataline_status, dict), f"USB2数据线状态应该返回字典，实际返回: {type(dataline_status)}"
+        assert len(dataline_status) == len(channels), f"USB2数据线状态应该包含 {len(channels)} 个通道，实际包含 {len(dataline_status)} 个"
+        logger.info("  USB2数据线状态:")
         for ch in channels:
-            if isinstance(dataline_status, dict):
-                status = dataline_status.get(ch, 'N/A')
-            else:
-                status = dataline_status
-            logger.info(f"    通道 {ch}: {'ON' if status == 1 else 'OFF' if status == 0 else status}")
-    except:
-        logger.info("  数据线状态: 不支持")
+            assert ch in dataline_status, f"USB2数据线状态缺少通道 {ch}"
+            status = dataline_status[ch]
+            assert status in [0, 1], f"通道 {ch} USB2数据线状态值异常: {status}"
+            logger.info(f"    通道 {ch}: {'ON' if status == 1 else 'OFF'}")
+        logger.info(f"  ✓ USB2数据线状态返回值齐全，包含所有 {len(channels)} 个通道")
+    except Exception as e:
+        logger.info(f"  USB2数据线状态: 不支持 ({e})")
+    
+    # 获取所有通道的USB3数据线状态
+    try:
+        usb3_dataline_status = hub.get_channel_usb3_dataline_status(*channels)
+        assert usb3_dataline_status is not None, "USB3数据线状态读取失败"
+        assert isinstance(usb3_dataline_status, dict), f"USB3数据线状态应该返回字典，实际返回: {type(usb3_dataline_status)}"
+        assert len(usb3_dataline_status) == len(channels), f"USB3数据线状态应该包含 {len(channels)} 个通道，实际包含 {len(usb3_dataline_status)} 个"
+        logger.info("  USB3数据线状态:")
+        for ch in channels:
+            assert ch in usb3_dataline_status, f"USB3数据线状态缺少通道 {ch}"
+            status = usb3_dataline_status[ch]
+            assert status in [0, 1], f"通道 {ch} USB3数据线状态值异常: {status}"
+            logger.info(f"    通道 {ch}: {'ON' if status == 1 else 'OFF'}")
+        logger.info(f"  ✓ USB3数据线状态返回值齐全，包含所有 {len(channels)} 个通道")
+    except Exception as e:
+        logger.info(f"  USB3数据线状态: 不支持 ({e})")
 
 
 def test_alternating_power_pattern(hub, max_channels):
