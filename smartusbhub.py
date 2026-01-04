@@ -425,6 +425,32 @@ class SmartUSBHub:
         return cls._lock_dir
     
     @classmethod
+    def _check_process_exists(cls, pid):
+        """
+        检查进程是否存在（跨平台）
+        
+        Args:
+            pid (int): 进程ID
+            
+        Returns:
+            bool: 如果进程存在返回 True，否则返回 False
+        """
+        try:
+            if os.name == 'nt':  # Windows
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_INFORMATION
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            else:  # Unix/Linux/macOS
+                os.kill(pid, 0)  # 发送信号0，不实际杀死进程，只检查是否存在
+                return True
+        except (OSError, ProcessLookupError, AttributeError):
+            return False
+    
+    @classmethod
     def _acquire_port_lock(cls, port):
         """
         获取端口的跨进程文件锁
@@ -458,7 +484,27 @@ class SmartUSBHub:
                     logger.debug(f"Acquired file lock for port {port}")
                     return True
                 except (IOError, OSError):
-                    # 锁已被其他进程持有
+                    # 锁已被其他进程持有，检查进程是否还存在
+                    if os.path.exists(lock_file_path):
+                        try:
+                            with open(lock_file_path, 'r') as f:
+                                pid_str = f.read().strip()
+                                if pid_str.isdigit():
+                                    pid = int(pid_str)
+                                    if not cls._check_process_exists(pid):
+                                        # 进程不存在，清理残留锁文件
+                                        logger.debug(f"Cleaning up stale lock file for port {port} (process {pid} no longer exists)")
+                                        os.remove(lock_file_path)
+                                        # 重试获取锁
+                                        lock_file = open(lock_file_path, 'w')
+                                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                        cls._port_locks[port] = lock_file
+                                        lock_file.write(str(os.getpid()))
+                                        lock_file.flush()
+                                        logger.debug(f"Acquired file lock for port {port} after cleanup")
+                                        return True
+                        except Exception as e:
+                            logger.debug(f"Error checking lock file: {e}")
                     if 'lock_file' in locals():
                         lock_file.close()
                     logger.warning(f"Port {port} is locked by another process")
@@ -467,32 +513,79 @@ class SmartUSBHub:
                 # Windows 使用 msvcrt.locking
                 # 注意：msvcrt.locking需要以二进制模式打开文件，并锁定特定字节
                 try:
-                    # 以二进制读写模式打开文件
-                    lock_file = open(lock_file_path, 'r+b')
+                    # 先检查文件是否存在，如果存在则检查进程是否还在运行
+                    if os.path.exists(lock_file_path):
+                        try:
+                            with open(lock_file_path, 'rb') as f:
+                                pid_bytes = f.read(16).strip()  # 读取前16字节（足够存储进程ID）
+                                if pid_bytes:
+                                    try:
+                                        pid = int(pid_bytes.decode().strip())
+                                        if not cls._check_process_exists(pid):
+                                            # 进程不存在，清理残留锁文件
+                                            logger.debug(f"Cleaning up stale lock file for port {port} (process {pid} no longer exists)")
+                                            try:
+                                                os.remove(lock_file_path)
+                                            except:
+                                                pass
+                                    except (ValueError, UnicodeDecodeError):
+                                        pass
+                        except Exception as e:
+                            logger.debug(f"Error checking lock file: {e}")
+                    
+                    # 以二进制读写模式打开文件（如果不存在则创建）
+                    lock_file = open(lock_file_path, 'a+b')  # 使用追加模式，文件不存在时自动创建
+                    lock_file.seek(0)  # 移动到文件开头
                     # 如果文件为空，先写入一个字节
-                    try:
-                        lock_file.seek(0, 2)  # 移动到文件末尾
-                        if lock_file.tell() == 0:
-                            lock_file.write(b'0')
-                            lock_file.flush()
-                    except:
-                        pass
+                    if lock_file.tell() == 0 or os.path.getsize(lock_file_path) == 0:
+                        lock_file.write(b'0')
+                        lock_file.flush()
                     # 锁定文件的第一个字节（非阻塞）
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                     cls._port_locks[port] = lock_file
                     # 写入当前进程ID
                     lock_file.seek(0)
-                    lock_file.write(str(os.getpid()).encode())
+                    lock_file.write(str(os.getpid()).encode().ljust(16))  # 左对齐，填充到16字节
                     lock_file.flush()
                     logger.debug(f"Acquired file lock for port {port}")
                     return True
-                except IOError:
+                except IOError as e:
                     # 锁已被其他进程持有
                     if 'lock_file' in locals():
-                        lock_file.close()
-                    logger.warning(f"Port {port} is locked by another process")
-                    return False
+                        try:
+                            lock_file.close()
+                        except:
+                            pass
+                    # 检查是否是文件不存在错误（不应该发生，因为我们用了'a+b'模式）
+                    if not os.path.exists(lock_file_path):
+                        logger.debug(f"Lock file does not exist, retrying: {e}")
+                        # 重试一次
+                        try:
+                            lock_file = open(lock_file_path, 'a+b')
+                            lock_file.seek(0)
+                            if lock_file.tell() == 0 or os.path.getsize(lock_file_path) == 0:
+                                lock_file.write(b'0')
+                                lock_file.flush()
+                            lock_file.seek(0)
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                            cls._port_locks[port] = lock_file
+                            lock_file.seek(0)
+                            lock_file.write(str(os.getpid()).encode().ljust(16))
+                            lock_file.flush()
+                            logger.debug(f"Acquired file lock for port {port} on retry")
+                            return True
+                        except Exception as retry_e:
+                            logger.warning(f"Port {port} is locked by another process (retry failed: {retry_e})")
+                            if 'lock_file' in locals():
+                                try:
+                                    lock_file.close()
+                                except:
+                                    pass
+                            return False
+                    else:
+                        logger.warning(f"Port {port} is locked by another process: {e}")
+                        return False
             else:
                 # 不支持文件锁的系统，回退到进程内检查
                 logger.warning("File locking not supported on this system, falling back to process-level check")
