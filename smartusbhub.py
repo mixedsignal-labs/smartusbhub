@@ -268,6 +268,10 @@ CMD_GET_DEVICE_ADDRESS              = 0x12
 CMD_SET_CHANNEL_LOW_CURRENT         = 0x13
 CMD_GET_CHANNEL_LOW_CURRENT         = 0x14
 
+CMD_REBOOT_MCU                      = 0xF7
+CMD_GET_SERIAL_NO                   = 0xF9
+CMD_GET_PRODUCT_TYPE                = 0xF0
+CMD_GET_MAX_CHANNELS                = 0xF1
 CMD_FACTORY_RESET                   = 0xFC   
 CMD_GET_FIRMWARE_VERSION            = 0xFD
 CMD_GET_HARDWARE_VERSION            = 0xFE
@@ -280,6 +284,31 @@ CHANNEL_4 = 0x08
 
 OPERATE_MODE_NORMAL = 0
 OPERATE_MODE_INTERLOCK = 1
+
+# Product type definitions
+# 产品类型表：包含产品类型ID、名称和通道数量
+PRODUCT_TYPE_TABLE = {
+    0x00: {
+        "name": "HBP_USB2_4CH",
+        "channels": 4,
+        "description": "USB2.0 4通道集线器"
+    },
+    0x01: {
+        "name": "HBP_USB2_2CH",
+        "channels": 2,
+        "description": "USB2.0 2通道集线器"
+    },
+    0x02: {
+        "name": "HBP_USB3_4CH",
+        "channels": 4,
+        "description": "USB3.0 4通道集线器"
+    },
+    0x03: {
+        "name": "FLEX_3CH",
+        "channels": 3,
+        "description": "FlexConnect 3通道切换器"
+    }
+}
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -373,6 +402,10 @@ class SmartUSBHub:
             CMD_GET_AUTO_RESTORE_STATUS: threading.Event(),
             CMD_SET_DEVICE_ADDRESS: threading.Event(),
             CMD_GET_DEVICE_ADDRESS: threading.Event(),
+            CMD_REBOOT_MCU: threading.Event(),
+            CMD_GET_PRODUCT_TYPE: threading.Event(),
+            CMD_GET_MAX_CHANNELS: threading.Event(),
+            CMD_GET_SERIAL_NO: threading.Event(),
             CMD_FACTORY_RESET:threading.Event(),
             CMD_GET_FIRMWARE_VERSION: threading.Event(),
             CMD_GET_HARDWARE_VERSION: threading.Event(),
@@ -385,6 +418,9 @@ class SmartUSBHub:
         self.poweroff_recover = None
         self.hardware_version = None
         self.firmware_version = None
+        self.product_type = None
+        self.max_channels = None
+        self.serial_no = None
         self.operate_mode = None
         self.auto_restore_status = None
         self.button_control_status = None
@@ -455,6 +491,28 @@ class SmartUSBHub:
             except Exception as e:
                 logger.error(f"Error in callback for command {cmd:#04x}: {e}")
                 
+    @staticmethod
+    def get_product_info(product_type_id):
+        """
+        从产品类型ID获取产品信息。
+        
+        Args:
+            product_type_id (int): 产品类型ID（0x00-0x03）
+            
+        Returns:
+            dict or None: 包含产品信息的字典，如果产品类型ID无效则返回None。
+            字典包含以下键：
+                - name: 产品名称（如 "HBP_USB2_4CH"）
+                - channels: 通道数量
+                - description: 产品描述
+                
+        Example:
+            >>> info = SmartUSBHub.get_product_info(0x00)
+            >>> print(info['name'])  # "HBP_USB2_4CH"
+            >>> print(info['channels'])  # 4
+        """
+        return PRODUCT_TYPE_TABLE.get(product_type_id)
+    
     @classmethod
     def scan_available_ports(cls):
         """
@@ -595,7 +653,7 @@ class SmartUSBHub:
                         if result is not None:
                             cmd, channel, value, length = result
 
-                            logger.debug(f"Parsed CMD: {cmd:#04x}, Channel: {channel:#04x}, Value: {value}")
+                            logger.debug(f"Parsed CMD: {cmd:#04x}, Channel: {channel:#04x}, Value: {value}, Raw buffer: {buffer[:length].hex()}")
 
                             if cmd == CMD_SET_CHANNEL_POWER:
                                 self._handle_set_channel_power_status()
@@ -649,6 +707,13 @@ class SmartUSBHub:
                                 self._handle_firmware_version(value)
                             elif cmd == CMD_GET_HARDWARE_VERSION:
                                 self._handle_hardware_version(value)
+                            elif cmd == CMD_GET_PRODUCT_TYPE:
+                                self._handle_product_type(value)
+                            elif cmd == CMD_GET_MAX_CHANNELS:
+                                logger.debug(f"CMD_GET_MAX_CHANNELS received: cmd={cmd:#04x}, channel={channel:#04x}, value={value}")
+                                self._handle_get_max_channels(value)
+                            elif cmd == CMD_GET_SERIAL_NO:
+                                self._handle_serial_no(value)
                             if cmd in self.ack_events:
                                 self._invoke_callback(cmd,channel,value)
                                 self.ack_events[cmd].set()
@@ -893,6 +958,36 @@ class SmartUSBHub:
         logger.debug("_handle_hardware_version ACK")
         self.hardware_version = value
 
+    def _handle_product_type(self, value):
+        logger.debug("_handle_product_type ACK")
+        self.product_type = value
+
+    def _handle_get_max_channels(self, value):
+        logger.debug(f"_handle_get_max_channels ACK, value={value}")
+        # 检查value是否合理（通道数量应该在1-16之间）
+        if value == 0xFF or value > 16:
+            logger.warning(f"Received suspicious max_channels value: {value} (0x{value:02X}). This might indicate an error response from the device.")
+            # 如果返回0xFF，说明设备固件可能不支持此命令，尝试从产品类型推断
+            if value == 0xFF and self.product_type is not None:
+                product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+                if product_info is not None:
+                    inferred_channels = product_info["channels"]
+                    logger.info(f"Device firmware doesn't support CMD_GET_MAX_CHANNELS. Inferring max_channels={inferred_channels} from product_type={self.product_type} ({product_info['name']})")
+                    self.max_channels = inferred_channels
+                    return
+            # 如果无法推断，保持原值（可能是0xFF）
+            self.max_channels = value
+        else:
+            self.max_channels = value
+
+    def _handle_serial_no(self, value):
+        logger.debug("_handle_serial_no ACK")
+        # value is a string for V3 protocol
+        if isinstance(value, str):
+            self.serial_no = value
+        else:
+            self.serial_no = None
+
     def _handle_set_auto_restore(self):
         logger.debug("_handle_set_auto_restore ACK")
 
@@ -907,24 +1002,69 @@ class SmartUSBHub:
         Returns:
             dict: A dictionary containing the hub's information.
         """
-        self.hardware_version = self.get_hardware_version()
-        self.firmware_version =  self.get_firmware_version()
-        self.operate_mode = self.get_operate_mode()
-        self.auto_restore_status = self.get_auto_restore_status()
-        self.button_control_status = self.get_button_control_status()
-        self.device_address = self.get_device_address()
-        self.channel_default_power_status = self.get_default_power_status(1,2,3,4)
-        self.channel_default_dataline_status = self.get_default_dataline_status(1,2,3,4)
+        # 重试获取所有关键信息，至少尝试10秒
+        # 使用重试机制确保在设备初始化或恢复期间也能成功获取信息
+        logger.info("Getting device info with retry mechanism (max 10s per item)...")
+        
+        self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
+        self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
+        self.product_type = self._retry_get_info(self.get_product_type, "product_type")
+        # 先尝试获取通道数量
+        self.max_channels = self._retry_get_info(self.get_max_channels, "max_channels")
+        # 如果返回无效值（0xFF），尝试从产品类型推断
+        if self.max_channels == 0xFF and self.product_type is not None:
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            if product_info is not None:
+                inferred_channels = product_info["channels"]
+                logger.info(f"Device firmware doesn't support CMD_GET_MAX_CHANNELS. Inferring max_channels={inferred_channels} from product_type={self.product_type} ({product_info['name']})")
+                self.max_channels = inferred_channels
+        self.serial_no = self._retry_get_info(self.get_serial_no, "serial_no")
+        self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
+        self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
+        self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
+        self.device_address = self._retry_get_info(self.get_device_address, "device_address")
+        
+        # 获取默认状态，如果失败则保持原有值（不覆盖为None）
+        # 这些不是关键信息，所以不强制重试
+        default_power = self.get_default_power_status(1,2,3,4)
+        if default_power is not None:
+            self.channel_default_power_status = default_power
+        
+        default_dataline = self.get_default_dataline_status(1,2,3,4)
+        if default_dataline is not None:
+            self.channel_default_dataline_status = default_dataline
 
+        # 从产品类型表获取产品名称
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type) if self.product_type is not None else None
+        product_type_name = product_info["name"] if product_info is not None else (f"Unknown({self.product_type})" if self.product_type is not None else "N/A")
+        
         hub_info = {
             "id": self.port.split("/")[-1],
             "address": self.device_address,
             "hardware_version": self.hardware_version,
             "firmware_version": self.firmware_version,
+            "product_type": product_type_name,
+            "max_channels": self.max_channels if self.max_channels is not None else "N/A",
+            "serial_no": self.serial_no if self.serial_no else "N/A",
             "operate_mode": "normal" if self.operate_mode == 0 else "interlock" if self.operate_mode == 1 else "N/A",
             "auto_restore": "enabled" if self.auto_restore_status == 1 else "disabled",
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
         }
+        
+        # 检查关键信息是否都获取成功
+        if self.operate_mode is None:
+            logger.error("Failed to get operate mode after retries - this is critical!")
+        if self.hardware_version is None:
+            logger.warning("Failed to get hardware_version after retries")
+        if self.firmware_version is None:
+            logger.warning("Failed to get firmware_version after retries")
+        if self.product_type is None:
+            logger.warning("Failed to get product_type after retries")
+        if self.max_channels is None:
+            logger.warning("Failed to get max_channels after retries")
+        if self.serial_no is None:
+            logger.warning("Failed to get serial_no after retries")
+            
         return hub_info
     @synchronized
     def set_operate_mode(self, mode):
@@ -1567,4 +1707,101 @@ class SmartUSBHub:
             return self.hardware_version
         else:
             logger.error("get_hardware_version No ACK!")
+            return None
+
+    @synchronized
+    def get_product_type(self):
+        """
+        Query the device's product type.
+
+        Returns:
+            int or None: The product type ID, or None if no response.
+            
+        Product types (see PRODUCT_TYPE_TABLE for details):
+            - 0x00: HBP_USB2_4CH (USB2.0 4通道集线器)
+            - 0x01: HBP_USB2_2CH (USB2.0 2通道集线器)
+            - 0x02: HBP_USB3_4CH (USB3.0 4通道集线器)
+            - 0x03: FLEX_3CH (FlexConnect 3通道集线器)
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_PRODUCT_TYPE]
+        ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_PRODUCT_TYPE, None, None)
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_product_type ACK")
+            return self.product_type
+        else:
+            logger.error("get_product_type No ACK!")
+            return None
+
+    @synchronized
+    def get_product_name(self):
+        """
+        Get the product name based on the device's product type.
+
+        Returns:
+            str or None: The product name (e.g., "HBP_USB2_4CH"), or None if product type is unknown or not available.
+            
+        Example:
+            >>> hub = SmartUSBHub(port)
+            >>> name = hub.get_product_name()
+            >>> print(name)  # "HBP_USB2_4CH"
+        """
+        # 如果产品类型还未获取，先获取
+        if self.product_type is None:
+            self.product_type = self.get_product_type()
+        
+        # 如果产品类型仍然为None，返回None
+        if self.product_type is None:
+            return None
+        
+        # 从产品类型表获取产品名称
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        if product_info is not None:
+            return product_info["name"]
+        else:
+            return f"Unknown({self.product_type:#02x})"
+
+    @synchronized
+    def get_max_channels(self):
+        """
+        Query the device's maximum channel count.
+
+        Returns:
+            int or None: The maximum number of channels supported by the device, or None if no response.
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_MAX_CHANNELS]
+        ack_event.clear()
+        # 发送命令
+        self._send_packet(CMD_GET_MAX_CHANNELS, None, None)
+        # 等待ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_max_channels ACK")
+            return self.max_channels
+        else:
+            logger.error("get_max_channels No ACK!")
+            return None
+
+    @synchronized
+    def get_serial_no(self):
+        """
+        Query the device's serial number (using V3 protocol).
+
+        Returns:
+            str or None: The serial number string (format: "XXXXXXXX-XXXXXXXX-XXXXXXXX"), or None if no response.
+        """
+        # 先清除事件，避免之前残留的ACK影响
+        ack_event = self.ack_events[CMD_GET_SERIAL_NO]
+        ack_event.clear()
+        # 发送命令 (V1 protocol for request)
+        self._send_packet(CMD_GET_SERIAL_NO, None, None)
+        # 等待ACK (response will be V3 protocol)
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_serial_no ACK")
+            return self.serial_no
+        else:
+            logger.error("get_serial_no No ACK!")
             return None
