@@ -5,17 +5,19 @@
 ## 文档
 
 - **[README.md](./README.md)** (本文件) - 快速开始指南
-- **[README_INTEGRATION.md](./README_INTEGRATION.md)** - 集成测试详细说明
+- **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 📖 **测试文件使用指南（推荐阅读）** - 详细说明每个测试文件的用途、使用方法和注意事项
 
 ## 测试结构
 
 ### 集成测试（需要硬件）
 - `test_integration.py` - 使用真实 SmartUSBHub 设备的常规集成测试（22个测试）
-- `test_integration_stress.py` - 压力测试（19个测试，包含100万次测试，约33分钟/个）
+- `test_stress_core.py` - 核心功能压力测试（通过大量重复操作验证设备稳定性）
+- `test_flexconnect.py` - FlexConnect模式测试（PC/U盘1/U盘2模式切换）
 
 ### 测试运行器
-- `run_integration_tests.py` - 集成测试运行脚本
-- `generate_report.py` - 生成 HTML 测试报告的便捷脚本
+- `run_integration_tests.py` - 集成测试运行脚本（自动生成HTML报告）
+- `run_stress_tests.py` - 压力测试运行脚本（自动生成HTML报告）
+- `run_flexconnect_tests.py` - FlexConnect测试运行脚本（自动生成HTML报告）
 
 ### 配置文件
 - `pytest.ini` - Pytest 配置文件（已配置 HTML 报告）
@@ -108,21 +110,18 @@ pip install pytest-html
 
 ### 使用方法
 
-#### 方法1: 使用便捷脚本（推荐）
+#### 方法1: 使用运行脚本（推荐，自动生成报告）
 
 ```bash
-# 生成常规测试报告
-python test/generate_report.py
+# 运行常规测试并生成报告
+python test/run_integration_tests.py
 
-# 生成压力测试报告
-python test/generate_report.py --stress
+# 运行压力测试并生成报告
+python test/run_stress_tests.py
 
-# 生成所有测试报告
-python test/generate_report.py --all
-
-# 生成报告并自动打开浏览器
-python test/generate_report.py --open
-python test/generate_report.py --stress --open
+# 不自动打开报告
+python test/run_integration_tests.py --no-open
+python test/run_stress_tests.py --no-open
 ```
 
 #### 方法2: 直接使用 pytest
@@ -132,7 +131,7 @@ python test/generate_report.py --stress --open
 pytest test/test_integration.py --html=report.html --self-contained-html
 
 # 生成压力测试报告
-pytest test/test_integration_stress.py --html=report.html --self-contained-html
+pytest test/test_stress_core.py --html=report.html --self-contained-html
 
 # 生成所有测试报告
 pytest test/ --html=report.html --self-contained-html
@@ -152,4 +151,4 @@ HTML 报告包含：
 ## 更多信息
 
 详细的使用说明请参考：
-- **[README_INTEGRATION.md](./README_INTEGRATION.md)** - 集成测试详细说明和使用指南
+- **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 📖 **测试文件使用指南** - 详细说明每个测试文件的用途、使用方法和注意事项

@@ -22,7 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
     args = parser.parse_args()
     
-    test_file = os.path.join(os.path.dirname(__file__), "test_integration_stress.py")
+    test_file = os.path.join(os.path.dirname(__file__), "test_stress_core.py")
     
     pytest_args = [
         test_file,
@@ -65,8 +65,17 @@ if __name__ == "__main__":
             print(f"\n[OK] HTML报告已生成: {report_abs_path}")
             try:
                 import webbrowser
-                # macOS 上需要 file:/// 格式（三个斜杠）
-                webbrowser.open(f"file:///{report_abs_path}")
+                # Windows上需要将反斜杠转换为正斜杠，并使用file:///格式
+                if os.name == 'nt':  # Windows
+                    # Windows路径格式: file:///C:/path/to/file.html
+                    report_url = report_abs_path.replace('\\', '/')
+                    if not report_url.startswith('/'):
+                        report_url = '/' + report_url
+                    report_url = f"file://{report_url}"
+                else:  # macOS/Linux
+                    # macOS/Linux路径格式: file:///path/to/file.html
+                    report_url = f"file://{report_abs_path}"
+                webbrowser.open(report_url)
                 print("[OK] 已在浏览器中打开报告")
             except Exception as e:
                 print(f"[WARNING] 无法自动打开浏览器: {e}")

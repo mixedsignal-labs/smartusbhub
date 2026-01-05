@@ -1,41 +1,42 @@
-#!/usr/bin/env python
 """
-运行集成测试 - 直接连接真实设备
+运行FlexConnect测试的便捷脚本
 
 使用方法:
-    python test/run_integration_tests.py              # 运行所有测试并自动打开HTML报告
-    python test/run_integration_tests.py --no-open    # 运行测试但不自动打开报告
-    python test/run_integration_tests.py -k voltage   # 运行包含voltage的测试
-    python test/run_integration_tests.py --tb=short   # 简短错误信息
+    python test/run_flexconnect_tests.py                    # 运行所有FlexConnect测试并自动打开HTML报告
+    python test/run_flexconnect_tests.py --no-open          # 运行测试但不自动打开报告
+    python test/run_flexconnect_tests.py --no-html         # 不生成HTML报告
+    python test/run_flexconnect_tests.py -k mode            # 运行包含mode的测试
 """
+import pytest
 import sys
 import os
 import argparse
 
-# 添加父目录到路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加项目根目录到路径
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-if __name__ == '__main__':
-    import pytest
-    
-    parser = argparse.ArgumentParser(description="运行 SmartUSBHub 集成测试")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="运行 SmartUSBHub FlexConnect 测试")
     parser.add_argument("--no-open", action="store_true", help="不自动打开HTML报告（默认会自动打开）")
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
     # 解析已知参数，剩余参数传递给pytest
     args, pytest_args = parser.parse_known_args()
     
-    # 默认参数
-    test_args = [
-        'test/test_integration.py',
-        '-v',                    # 详细输出
-        '-s',                    # 显示print输出
-        '--log-cli-level=INFO',  # 日志级别
-        '--tb=short',            # 简短错误信息
+    test_file = os.path.join(os.path.dirname(__file__), "test_flexconnect.py")
+    
+    pytest_args_list = [
+        test_file,
+        "-v", "-s",  # 详细输出，显示print/log
+        "--log-cli-level=INFO",  # 显示INFO级别日志
     ]
     
     # 添加pytest命令行参数
     if pytest_args:
-        test_args.extend(pytest_args)
+        pytest_args_list.extend(pytest_args)
+    
+    print("运行FlexConnect测试...")
     
     # 检查是否安装 pytest-html 插件
     report_path = None
@@ -47,8 +48,8 @@ if __name__ == '__main__':
     
     # 默认总是生成HTML报告（如果插件可用且未指定 --no-html）
     if html_available and not args.no_html:
-        report_path = os.path.join(os.path.dirname(__file__), "report.html")
-        test_args.extend([
+        report_path = os.path.join(os.path.dirname(__file__), "report_flexconnect.html")
+        pytest_args_list.extend([
             "--html", report_path,
             "--self-contained-html"
         ])
@@ -58,10 +59,10 @@ if __name__ == '__main__':
         print("  安装命令: pip install pytest-html")
     
     print("\n" + "="*70)
-    print("开始运行集成测试...")
+    print("开始运行FlexConnect测试...")
     print("="*70 + "\n")
     
-    exit_code = pytest.main(test_args)
+    exit_code = pytest.main(pytest_args_list)
     
     # 测试完成后，如果报告存在，自动打开（除非指定了 --no-open）
     if not args.no_open and report_path:
@@ -89,4 +90,7 @@ if __name__ == '__main__':
             print(f"\n[WARNING] 报告文件未找到: {report_abs_path}")
     
     sys.exit(exit_code)
+
+
+
 

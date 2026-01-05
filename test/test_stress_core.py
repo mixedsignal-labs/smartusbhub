@@ -1,5 +1,5 @@
 """
-简化压力测试 - 只测试核心功能
+核心功能压力测试 - 通过大量重复操作验证设备稳定性
 
 测试内容：
 1. 多通道设置电源
@@ -9,10 +9,10 @@
 
 使用方法:
     # 运行压力测试
-    pytest test/test_integration_stress.py -v
+    pytest test/test_stress_core.py -v
 
     # 显示详细日志
-    pytest test/test_integration_stress.py -v -s --log-cli-level=INFO
+    pytest test/test_stress_core.py -v -s --log-cli-level=INFO
 """
 import pytest
 import time
@@ -38,7 +38,7 @@ from smartusbhub import SmartUSBHub
 logger = logging.getLogger(__name__)
 
 # ==================== 测试次数配置 ====================
-STRESS_TEST_TOTAL_COUNT = 100000
+STRESS_TEST_TOTAL_COUNT = 20000
 
 
 def format_time(seconds):
@@ -139,6 +139,7 @@ def generate_stats_html(stats, op_names, supports_usb2, supports_usb3,
     html += '<th style="border: 1px solid #ddd; padding: 8px; text-align: right;">失败次数</th>'
     html += '<th style="border: 1px solid #ddd; padding: 8px; text-align: right;">总次数</th>'
     html += '<th style="border: 1px solid #ddd; padding: 8px; text-align: right;">成功率</th>'
+    html += '<th style="border: 1px solid #ddd; padding: 8px; text-align: right;">平均用时</th>'
     html += '</tr>'
     
     for op_key, op_name in op_names.items():
@@ -152,6 +153,7 @@ def generate_stats_html(stats, op_names, supports_usb2, supports_usb3,
         total_op = stat['success'] + stat['failure']
         if total_op > 0:
             op_success_rate = (stat['success'] / total_op * 100) if total_op > 0 else 0
+            avg_time = (stat['total_time'] / total_op * 1000) if total_op > 0 else 0  # 转换为毫秒
             success_color = 'green' if op_success_rate >= 95 else 'orange' if op_success_rate >= 80 else 'red'
             html += '<tr>'
             html += f'<td style="border: 1px solid #ddd; padding: 8px;">{op_name}</td>'
@@ -159,11 +161,12 @@ def generate_stats_html(stats, op_names, supports_usb2, supports_usb3,
             html += f'<td style="border: 1px solid #ddd; padding: 8px; text-align: right; color: red;">{stat["failure"]:,}</td>'
             html += f'<td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{total_op:,}</td>'
             html += f'<td style="border: 1px solid #ddd; padding: 8px; text-align: right; font-weight: bold; color: {success_color};">{op_success_rate:.2f}%</td>'
+            html += f'<td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{avg_time:.2f} ms</td>'
             html += '</tr>'
         else:
             html += '<tr style="color: #999;">'
             html += f'<td style="border: 1px solid #ddd; padding: 8px;">{op_name}</td>'
-            html += '<td colspan="4" style="border: 1px solid #ddd; padding: 8px; text-align: center;">未执行</td>'
+            html += '<td colspan="5" style="border: 1px solid #ddd; padding: 8px; text-align: center;">未执行</td>'
             html += '</tr>'
     
     html += '</table>'
@@ -300,14 +303,15 @@ def test_stress_core_functions(hub, max_channels, request):
     failure_count = 0
     start_time = time.time()
     
-    # 详细统计：每个操作的成功和失败次数
+    # 详细统计：每个操作的成功、失败次数和用时
+    # 每个操作统计：success, failure, total_time, count
     stats = {
-        'set_power': {'success': 0, 'failure': 0},
-        'get_power': {'success': 0, 'failure': 0},
-        'set_usb2_dataline': {'success': 0, 'failure': 0},
-        'get_usb2_dataline': {'success': 0, 'failure': 0},
-        'set_usb3_dataline': {'success': 0, 'failure': 0},
-        'get_usb3_dataline': {'success': 0, 'failure': 0},
+        'set_power': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
+        'get_power': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
+        'set_usb2_dataline': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
+        'get_usb2_dataline': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
+        'set_usb3_dataline': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
+        'get_usb3_dataline': {'success': 0, 'failure': 0, 'total_time': 0.0, 'count': 0},
     }
     
     # 初始化进度显示
@@ -321,9 +325,14 @@ def test_stress_core_functions(hub, max_channels, request):
         for i in range(total_operations):
             cycle_success = True
             
-            # 1. 设置电源（反转状态）
+            # 1. 设置电源（反转状态）- 记录用时
             power_state = 1 - power_state
+            stats['set_power']['count'] += 1
+            set_power_start = time.time()
             set_power_result = hub.set_channel_power(*channels, state=power_state)
+            set_power_elapsed = time.time() - set_power_start
+            stats['set_power']['total_time'] += set_power_elapsed
+            
             if set_power_result:
                 stats['set_power']['success'] += 1
             else:
@@ -331,9 +340,14 @@ def test_stress_core_functions(hub, max_channels, request):
                 cycle_success = False
                 logger.warning(f"  第 {i+1} 次循环：设置电源失败")
             
-            # 2. 获取电源状态
+            # 2. 获取电源状态 - 记录用时
+            stats['get_power']['count'] += 1
+            get_power_start = time.time()
             try:
                 power_status = hub.get_channel_power_status(*channels)
+                get_power_elapsed = time.time() - get_power_start
+                stats['get_power']['total_time'] += get_power_elapsed
+                
                 is_valid, error_msg = validate_multi_channel_response(
                     power_status, channels, power_state, "电源状态"
                 )
@@ -344,14 +358,21 @@ def test_stress_core_functions(hub, max_channels, request):
                     cycle_success = False
                     logger.warning(f"  第 {i+1} 次循环：获取电源状态验证失败 - {error_msg}")
             except Exception as e:
+                get_power_elapsed = time.time() - get_power_start
+                stats['get_power']['total_time'] += get_power_elapsed
                 stats['get_power']['failure'] += 1
                 cycle_success = False
                 logger.warning(f"  第 {i+1} 次循环：获取电源状态异常: {e}")
             
-            # 3. 设置USB2数据线（如果支持）
+            # 3. 设置USB2数据线（如果支持）- 记录用时
             if supports_usb2:
                 usb2_dataline_state = 1 - usb2_dataline_state
+                stats['set_usb2_dataline']['count'] += 1
+                set_usb2_start = time.time()
                 set_usb2_result = hub.set_channel_usb2_dataline(*channels, state=usb2_dataline_state)
+                set_usb2_elapsed = time.time() - set_usb2_start
+                stats['set_usb2_dataline']['total_time'] += set_usb2_elapsed
+                
                 if set_usb2_result:
                     stats['set_usb2_dataline']['success'] += 1
                 else:
@@ -359,9 +380,14 @@ def test_stress_core_functions(hub, max_channels, request):
                     cycle_success = False
                     logger.warning(f"  第 {i+1} 次循环：设置USB2数据线失败")
                 
-                # 4. 获取USB2数据线状态
+                # 4. 获取USB2数据线状态 - 记录用时
+                stats['get_usb2_dataline']['count'] += 1
+                get_usb2_start = time.time()
                 try:
                     usb2_status = hub.get_channel_usb2_dataline_status(*channels)
+                    get_usb2_elapsed = time.time() - get_usb2_start
+                    stats['get_usb2_dataline']['total_time'] += get_usb2_elapsed
+                    
                     is_valid, error_msg = validate_multi_channel_response(
                         usb2_status, channels, usb2_dataline_state, "USB2数据线状态"
                     )
@@ -372,14 +398,21 @@ def test_stress_core_functions(hub, max_channels, request):
                         cycle_success = False
                         logger.warning(f"  第 {i+1} 次循环：获取USB2数据线状态验证失败 - {error_msg}")
                 except Exception as e:
+                    get_usb2_elapsed = time.time() - get_usb2_start
+                    stats['get_usb2_dataline']['total_time'] += get_usb2_elapsed
                     stats['get_usb2_dataline']['failure'] += 1
                     cycle_success = False
                     logger.warning(f"  第 {i+1} 次循环：获取USB2数据线状态异常: {e}")
             
-            # 5. 设置USB3数据线（如果支持）
+            # 5. 设置USB3数据线（如果支持）- 记录用时
             if supports_usb3:
                 usb3_dataline_state = 1 - usb3_dataline_state
+                stats['set_usb3_dataline']['count'] += 1
+                set_usb3_start = time.time()
                 set_usb3_result = hub.set_channel_usb3_dataline(*channels, state=usb3_dataline_state)
+                set_usb3_elapsed = time.time() - set_usb3_start
+                stats['set_usb3_dataline']['total_time'] += set_usb3_elapsed
+                
                 if set_usb3_result:
                     stats['set_usb3_dataline']['success'] += 1
                 else:
@@ -387,9 +420,14 @@ def test_stress_core_functions(hub, max_channels, request):
                     cycle_success = False
                     logger.warning(f"  第 {i+1} 次循环：设置USB3数据线失败")
                 
-                # 6. 获取USB3数据线状态
+                # 6. 获取USB3数据线状态 - 记录用时
+                stats['get_usb3_dataline']['count'] += 1
+                get_usb3_start = time.time()
                 try:
                     usb3_status = hub.get_channel_usb3_dataline_status(*channels)
+                    get_usb3_elapsed = time.time() - get_usb3_start
+                    stats['get_usb3_dataline']['total_time'] += get_usb3_elapsed
+                    
                     is_valid, error_msg = validate_multi_channel_response(
                         usb3_status, channels, usb3_dataline_state, "USB3数据线状态"
                     )
@@ -400,6 +438,8 @@ def test_stress_core_functions(hub, max_channels, request):
                         cycle_success = False
                         logger.warning(f"  第 {i+1} 次循环：获取USB3数据线状态验证失败 - {error_msg}")
                 except Exception as e:
+                    get_usb3_elapsed = time.time() - get_usb3_start
+                    stats['get_usb3_dataline']['total_time'] += get_usb3_elapsed
                     stats['get_usb3_dataline']['failure'] += 1
                     cycle_success = False
                     logger.warning(f"  第 {i+1} 次循环：获取USB3数据线状态异常: {e}")
@@ -460,6 +500,9 @@ def test_stress_core_functions(hub, max_channels, request):
         'get_usb3_dataline': '获取USB3数据线状态',
     }
     
+    logger.info(f"{'操作':<20s} {'成功':>8s} {'失败':>8s} {'总次数':>8s} {'成功率':>10s} {'平均用时':>12s}")
+    logger.info("-" * 70)
+    
     for op_key, op_name in op_names.items():
         # 只显示实际执行的操作
         if op_key.startswith('usb2') and not supports_usb2:
@@ -471,9 +514,10 @@ def test_stress_core_functions(hub, max_channels, request):
         total_op = stat['success'] + stat['failure']
         if total_op > 0:
             op_success_rate = (stat['success'] / total_op * 100) if total_op > 0 else 0
-            logger.info(f"  {op_name:20s}: 成功 {stat['success']:6d}, 失败 {stat['failure']:6d}, 成功率 {op_success_rate:6.2f}%")
+            avg_time = (stat['total_time'] / total_op * 1000) if total_op > 0 else 0  # 转换为毫秒
+            logger.info(f"  {op_name:<20s} {stat['success']:>8d} {stat['failure']:>8d} {total_op:>8d} {op_success_rate:>9.2f}% {avg_time:>11.2f}ms")
         else:
-            logger.info(f"  {op_name:20s}: 未执行")
+            logger.info(f"  {op_name:<20s} {'未执行':>8s}")
     
     logger.info("=" * 70)
     

@@ -284,6 +284,11 @@ CMD_SET_CHANNEL_SLOW_CHARGE         = 0x13
 CMD_SET_CHANNEL_FAST_CHARGE         = 0x17
 CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 
+# FlexConnect commands
+CMD_SET_FLEXCONNECT_MODE            = 0x20
+CMD_GET_FLEXCONNECT_MODE            = 0x21
+CMD_GET_FLEXCONNECT_FAULT           = 0x22
+
 CMD_REBOOT_MCU                      = 0xF7
 CMD_GET_SERIAL_NO                   = 0xF9
 CMD_GET_PRODUCT_TYPE                = 0xF0
@@ -300,6 +305,12 @@ CHANNEL_4 = 0x08
 
 OPERATE_MODE_NORMAL = 0
 OPERATE_MODE_INTERLOCK = 1
+
+# FlexConnect mode definitions
+FLEXCONNECT_MODE_PC = 0x00         # PC模式（ADB调试）
+FLEXCONNECT_MODE_UDISK1 = 0x01     # U盘1模式
+FLEXCONNECT_MODE_UDISK2 = 0x02     # U盘2模式
+FLEXCONNECT_MODE_DISCONNECT = 0x03 # 断开所有连接模式
 
 # Product type definitions
 # 产品类型表：包含产品类型ID、名称、通道数量和功能支持标志
@@ -318,7 +329,8 @@ PRODUCT_TYPE_TABLE = {
         "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换
         "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换
         "enable_ilim_switch": False,       # 不支持限流开关
-        "is_flexconnect": False
+        "is_flexconnect": False,
+        "ack_timeout": 0.1                 # ACK超时时间（秒），默认100ms
     },
     0x01: {
         "name": "HBP_USB2_2CH",
@@ -328,7 +340,8 @@ PRODUCT_TYPE_TABLE = {
         "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换
         "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换
         "enable_ilim_switch": False,       # 不支持限流开关
-        "is_flexconnect": False
+        "is_flexconnect": False,
+        "ack_timeout": 0.1                 # ACK超时时间（秒），默认100ms
     },
     0x02: {
         "name": "HBP_USB3_4CH",
@@ -338,7 +351,8 @@ PRODUCT_TYPE_TABLE = {
         "enable_usb2_data_switch": True, # 支持USB2.0数据线切换
         "enable_usb3_data_switch": True,  # 支持USB3.0数据线切换
         "enable_ilim_switch": True,        # 支持限流开关（慢充/快充模式）
-        "is_flexconnect": False
+        "is_flexconnect": False,
+        "ack_timeout": 0.1                 # ACK超时时间（秒），默认100ms
     },
     0x03: {
         "name": "FLEX_3CH",
@@ -348,7 +362,8 @@ PRODUCT_TYPE_TABLE = {
         "enable_usb2_data_switch": False, # 不支持USB2.0数据线切换（使用MUX）
         "enable_usb3_data_switch": False, # 不支持USB3.0数据线切换（使用MUX）
         "enable_ilim_switch": False,       # 不支持限流开关
-        "is_flexconnect": True            # 是FlexConnect产品
+        "is_flexconnect": True,            # 是FlexConnect产品
+        "ack_timeout": 0.3                 # ACK超时时间（秒），FlexConnect需要更长时间（考虑模式切换延迟）
     }
 }
 
@@ -655,6 +670,7 @@ class SmartUSBHub:
                 raise ValueError(f"Port {port} is already in use. Please disconnect the existing connection first.")
             raise
         
+        # 默认超时时间，会在获取产品类型后根据产品配置更新
         self.com_timeout = 0.1
         logger.info(f"SmartUSBHub initialized on port {self.port}")
 
@@ -690,6 +706,10 @@ class SmartUSBHub:
             CMD_FACTORY_RESET:threading.Event(),
             CMD_GET_FIRMWARE_VERSION: threading.Event(),
             CMD_GET_HARDWARE_VERSION: threading.Event(),
+            # FlexConnect commands
+            CMD_SET_FLEXCONNECT_MODE: threading.Event(),
+            CMD_GET_FLEXCONNECT_MODE: threading.Event(),
+            CMD_GET_FLEXCONNECT_FAULT: threading.Event(),
         }
         
         self.lock = threading.Lock()  # 用于串口操作的互斥锁
@@ -727,6 +747,10 @@ class SmartUSBHub:
         self.channel_voltages = {}
         self.channel_currents = {}
         self.channel_charge_modes = {}
+
+        # FlexConnect state
+        self.flexconnect_mode = None
+        self.flexconnect_fault_status = None
 
         self.device_address = None
 
@@ -955,6 +979,79 @@ class SmartUSBHub:
             SmartUSBHub or None: 如果找到匹配地址的设备则返回实例，否则返回None。
         """
         return cls.scan_and_connect(device_address=device_address)
+    
+    @classmethod
+    def auto_connect(cls, exclude_ports=None, feature_filter=None):
+        """
+        自动扫描并连接第一个可用的Smart USB Hub设备。
+        如果第一个设备被占用或连接失败，会自动尝试下一个设备，直到找到可用的设备。
+        
+        Args:
+            exclude_ports (set, optional): 要排除的端口集合（已连接的端口）。如果为None，自动排除已连接的端口。
+            feature_filter (str, optional): 功能过滤器。如果指定，只连接支持该功能的设备。
+                可选值: "adc", "usb2_data_switch", "usb3_data_switch", "ilim_switch", "flexconnect"
+        
+        Returns:
+            SmartUSBHub or None: 如果找到可用的设备则返回实例，否则返回None。
+        
+        Example:
+            >>> # 连接任何可用的设备
+            >>> hub = SmartUSBHub.auto_connect()
+            
+            >>> # 只连接FlexConnect设备
+            >>> hub = SmartUSBHub.auto_connect(feature_filter="flexconnect")
+            
+            >>> # 排除已连接的端口
+            >>> hub = SmartUSBHub.auto_connect(exclude_ports={"COM8"})
+        """
+        if exclude_ports is None:
+            exclude_ports = cls._connected_ports.copy()
+        
+        ports = cls.scan_available_ports()
+        if not ports:
+            logger.warning("No Smart USB Hub devices found")
+            return None
+        
+        logger.info(f"Found {len(ports)} device(s): {ports}")
+        
+        for port in ports:
+            # 跳过已连接的端口
+            if port in exclude_ports:
+                logger.debug(f"Skipping already connected port {port}")
+                continue
+            
+            logger.info(f"Trying to connect to {port}...")
+            try:
+                hub = cls(port)
+                logger.info(f"Successfully connected to {port}")
+                
+                # 如果指定了功能过滤器，检查设备是否支持该功能
+                if feature_filter is not None:
+                    if not hub._check_feature_support(feature_filter):
+                        logger.info(f"Device on {port} does not support feature '{feature_filter}', trying next device...")
+                        hub.disconnect()
+                        continue
+                    logger.info(f"Device on {port} supports feature '{feature_filter}'")
+                
+                return hub
+            except ValueError as e:
+                # 端口被占用或其他ValueError，尝试下一个
+                if "already in use" in str(e).lower() or "already in use by another" in str(e).lower():
+                    logger.info(f"Port {port} is already in use, trying next device...")
+                else:
+                    logger.warning(f"Failed to connect to {port}: {e}, trying next device...")
+                continue
+            except serial.SerialException as e:
+                # 串口异常，尝试下一个
+                logger.warning(f"Serial exception on {port}: {e}, trying next device...")
+                continue
+            except Exception as e:
+                # 其他异常，尝试下一个
+                logger.warning(f"Unexpected error connecting to {port}: {e}, trying next device...")
+                continue
+        
+        logger.warning("All devices are unavailable (occupied or connection failed)")
+        return None
     
     def _start(self):
         """
@@ -1192,6 +1289,12 @@ class SmartUSBHub:
                                 self._handle_get_max_channels(value)
                             elif cmd == CMD_GET_SERIAL_NO:
                                 self._handle_serial_no(value)
+                            elif cmd == CMD_SET_FLEXCONNECT_MODE:
+                                self._handle_set_flexconnect_mode(value)
+                            elif cmd == CMD_GET_FLEXCONNECT_MODE:
+                                self._handle_get_flexconnect_mode(value)
+                            elif cmd == CMD_GET_FLEXCONNECT_FAULT:
+                                self._handle_get_flexconnect_fault(value)
                             if cmd in self.ack_events:
                                 self._invoke_callback(cmd,channel,value)
                                 self.ack_events[cmd].set()
@@ -1617,6 +1720,55 @@ class SmartUSBHub:
         else:
             self.serial_no = None
 
+    def _handle_set_flexconnect_mode(self, value):
+        logger.debug("_handle_set_flexconnect_mode ACK")
+        # value is the mode returned by the device (0=PC, 1=UDISK1, 2=UDISK2, 3=DISCONNECT, 0xFF=error)
+        if value != 0xFF:
+            self.flexconnect_mode = value
+            if value == FLEXCONNECT_MODE_PC:
+                mode_str = "PC"
+            elif value == FLEXCONNECT_MODE_UDISK1:
+                mode_str = "UDISK1"
+            elif value == FLEXCONNECT_MODE_UDISK2:
+                mode_str = "UDISK2"
+            elif value == FLEXCONNECT_MODE_DISCONNECT:
+                mode_str = "DISCONNECT"
+            else:
+                mode_str = f"Unknown({value})"
+            logger.info(f"FlexConnect mode set to: {mode_str} ({value})")
+        else:
+            logger.error("FlexConnect mode set failed (device returned 0xFF)")
+
+    def _handle_get_flexconnect_mode(self, value):
+        logger.debug("_handle_get_flexconnect_mode ACK")
+        self.flexconnect_mode = value
+        if value == FLEXCONNECT_MODE_PC:
+            mode_str = "PC"
+        elif value == FLEXCONNECT_MODE_UDISK1:
+            mode_str = "UDISK1"
+        elif value == FLEXCONNECT_MODE_UDISK2:
+            mode_str = "UDISK2"
+        elif value == FLEXCONNECT_MODE_DISCONNECT:
+            mode_str = "DISCONNECT"
+        else:
+            mode_str = f"Unknown({value})"
+        logger.debug(f"FlexConnect current mode: {mode_str} ({value})")
+
+    def _handle_get_flexconnect_fault(self, value):
+        logger.debug("_handle_get_flexconnect_fault ACK")
+        self.flexconnect_fault_status = value
+        if value != 0:
+            fault_desc = []
+            if value & 0x01:
+                fault_desc.append("DUT_VBUS_FAULT")
+            if value & 0x02:
+                fault_desc.append("UDISK1_VBUS_FAULT")
+            if value & 0x04:
+                fault_desc.append("UDISK2_VBUS_FAULT")
+            logger.warning(f"FlexConnect fault detected: 0x{value:02X} ({', '.join(fault_desc)})")
+        else:
+            logger.debug("FlexConnect no fault detected")
+
     def _handle_set_auto_restore(self):
         logger.debug("_handle_set_auto_restore ACK")
 
@@ -1676,6 +1828,15 @@ class SmartUSBHub:
         self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
         self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
         self.product_type = self._retry_get_info(self.get_product_type, "product_type")
+        
+        # 根据产品类型设置ACK超时时间
+        if self.product_type is not None:
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            if product_info is not None:
+                ack_timeout = product_info.get("ack_timeout", 0.1)  # 默认100ms
+                self.com_timeout = ack_timeout
+                logger.info(f"Set ACK timeout to {ack_timeout}s for product {product_info['name']}")
+        
         # 先尝试获取通道数量
         self.max_channels = self._retry_get_info(self.get_max_channels, "max_channels")
         # 如果返回无效值（0xFF），尝试从产品类型推断
@@ -1693,13 +1854,22 @@ class SmartUSBHub:
         
         # 获取默认状态，如果失败则保持原有值（不覆盖为None）
         # 这些不是关键信息，所以不强制重试
-        default_power = self.get_default_power_status(1,2,3,4)
-        if default_power is not None:
-            self.channel_default_power_status = default_power
+        # 注意：FlexConnect产品不支持默认电源状态和默认数据线状态功能
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type) if self.product_type is not None else None
+        is_flexconnect = product_info.get("is_flexconnect", False) if product_info is not None else False
         
-        default_dataline = self.get_default_dataline_status(1,2,3,4)
-        if default_dataline is not None:
-            self.channel_default_dataline_status = default_dataline
+        if not is_flexconnect:
+            # 只有非FlexConnect产品才支持默认状态功能
+            default_power = self.get_default_power_status(1,2,3,4)
+            if default_power is not None:
+                self.channel_default_power_status = default_power
+            
+            default_dataline = self.get_default_dataline_status(1,2,3,4)
+            if default_dataline is not None:
+                self.channel_default_dataline_status = default_dataline
+        else:
+            # FlexConnect产品不支持这些功能，跳过
+            logger.debug("FlexConnect product does not support default power/dataline status, skipping...")
 
         # 从产品类型表获取产品名称
         product_info = PRODUCT_TYPE_TABLE.get(self.product_type) if self.product_type is not None else None
@@ -2644,6 +2814,122 @@ class SmartUSBHub:
         else:
             # 旧固件不支持此功能，使用debug级别而不是error
             logger.debug("get_max_channels No ACK (可能是不支持此功能的旧固件)")
+            return None
+
+    @synchronized
+    def set_flexconnect_mode(self, mode):
+        """
+        Set FlexConnect working mode.
+        
+        Args:
+            mode (int): The desired mode.
+                - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
+                - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
+                - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                - FLEXCONNECT_MODE_DISCONNECT (0x03): Disconnect all connections mode
+        
+        Returns:
+            bool: True if command was acknowledged and mode was set successfully, False otherwise.
+            
+        Raises:
+            ValueError: If the product is not a FlexConnect product or mode is invalid.
+        """
+        # Check if product is FlexConnect
+        if not self._check_feature_support("flexconnect"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} is not a FlexConnect product. "
+                           f"This method is only available for FlexConnect devices.")
+        
+        # Validate mode
+        if mode not in [FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2, FLEXCONNECT_MODE_DISCONNECT]:
+            raise ValueError(f"Invalid FlexConnect mode: {mode}. "
+                           f"Valid modes are: FLEXCONNECT_MODE_PC (0), "
+                           f"FLEXCONNECT_MODE_UDISK1 (1), FLEXCONNECT_MODE_UDISK2 (2), "
+                           f"FLEXCONNECT_MODE_DISCONNECT (3)")
+        
+        # Send command
+        self._send_packet(CMD_SET_FLEXCONNECT_MODE, None, mode)
+        if self._wait_for_ack_with_recovery(CMD_SET_FLEXCONNECT_MODE):
+            logger.debug("set_flexconnect_mode ACK")
+            # Check if mode was set successfully (device returns 0xFF on error)
+            if self.flexconnect_mode is not None and self.flexconnect_mode != 0xFF:
+                return True
+            else:
+                logger.error("set_flexconnect_mode failed (device returned error)")
+                return False
+        else:
+            logger.error("set_flexconnect_mode No ACK!")
+            return False
+
+    @synchronized
+    def get_flexconnect_mode(self):
+        """
+        Get the current FlexConnect working mode.
+        
+        Returns:
+            int or None: The current mode, or None if no response.
+                - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
+                - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
+                - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                - FLEXCONNECT_MODE_DISCONNECT (0x03): Disconnect all connections mode
+                
+        Raises:
+            ValueError: If the product is not a FlexConnect product.
+        """
+        # Check if product is FlexConnect
+        if not self._check_feature_support("flexconnect"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} is not a FlexConnect product. "
+                           f"This method is only available for FlexConnect devices.")
+        
+        # Clear event to avoid stale ACK
+        ack_event = self.ack_events[CMD_GET_FLEXCONNECT_MODE]
+        ack_event.clear()
+        # Send command
+        self._send_packet(CMD_GET_FLEXCONNECT_MODE, None, None)
+        # Wait for ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_flexconnect_mode ACK")
+            return self.flexconnect_mode
+        else:
+            logger.error("get_flexconnect_mode No ACK!")
+            return None
+
+    @synchronized
+    def get_flexconnect_fault(self):
+        """
+        Get FlexConnect fault status.
+        
+        Returns:
+            int or None: Fault status byte, or None if no response.
+                Bit 0: DUT_VBUS_FAULT
+                Bit 1: UDISK1_VBUS_FAULT
+                Bit 2: UDISK2_VBUS_FAULT
+                0 = No fault
+                
+        Raises:
+            ValueError: If the product is not a FlexConnect product or fault detection is not supported.
+        """
+        # Check if product is FlexConnect
+        if not self._check_feature_support("flexconnect"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} is not a FlexConnect product. "
+                           f"This method is only available for FlexConnect devices.")
+        
+        # Clear event to avoid stale ACK
+        ack_event = self.ack_events[CMD_GET_FLEXCONNECT_FAULT]
+        ack_event.clear()
+        # Send command
+        self._send_packet(CMD_GET_FLEXCONNECT_FAULT, None, None)
+        # Wait for ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_flexconnect_fault ACK")
+            return self.flexconnect_fault_status
+        else:
+            logger.error("get_flexconnect_fault No ACK!")
             return None
 
     @synchronized
