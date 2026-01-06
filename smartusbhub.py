@@ -1,9 +1,9 @@
 # Description: Python class to control Smart USB Hub with serial communication.
-# copyright: (c) 2024 EmbeddedTec studio
+# copyright: (c) 2026 makerlabtools
 # license: Apache-2.0
 # version: 1.0
-# author: EmbeddedTec studio
-# email:embeddedtec@outlook.com
+# author: makerlabtools
+# email: makerlabtools@outlook.com
 # for more information: https://github.com/MrzhangF1ghter/smartusbhub
 
 # protocol examples:
@@ -288,6 +288,8 @@ CMD_GET_CHANNEL_CHARGE_MODE         = 0x19
 CMD_SET_FLEXCONNECT_MODE            = 0x20
 CMD_GET_FLEXCONNECT_MODE            = 0x21
 CMD_GET_FLEXCONNECT_FAULT           = 0x22
+CMD_SET_FLEXCONNECT_DEFAULT_MODE    = 0x24
+CMD_GET_FLEXCONNECT_DEFAULT_MODE    = 0x25
 
 CMD_REBOOT_MCU                      = 0xF7
 CMD_GET_SERIAL_NO                   = 0xF9
@@ -710,6 +712,8 @@ class SmartUSBHub:
             CMD_SET_FLEXCONNECT_MODE: threading.Event(),
             CMD_GET_FLEXCONNECT_MODE: threading.Event(),
             CMD_GET_FLEXCONNECT_FAULT: threading.Event(),
+            CMD_SET_FLEXCONNECT_DEFAULT_MODE: threading.Event(),
+            CMD_GET_FLEXCONNECT_DEFAULT_MODE: threading.Event(),
         }
         
         self.lock = threading.Lock()  # 用于串口操作的互斥锁
@@ -751,6 +755,7 @@ class SmartUSBHub:
         # FlexConnect state
         self.flexconnect_mode = None
         self.flexconnect_fault_status = None
+        self.flexconnect_default_mode = None
 
         self.device_address = None
 
@@ -1295,6 +1300,10 @@ class SmartUSBHub:
                                 self._handle_get_flexconnect_mode(value)
                             elif cmd == CMD_GET_FLEXCONNECT_FAULT:
                                 self._handle_get_flexconnect_fault(value)
+                            elif cmd == CMD_SET_FLEXCONNECT_DEFAULT_MODE:
+                                self._handle_set_flexconnect_default_mode()
+                            elif cmd == CMD_GET_FLEXCONNECT_DEFAULT_MODE:
+                                self._handle_get_flexconnect_default_mode(value)
                             if cmd in self.ack_events:
                                 self._invoke_callback(cmd,channel,value)
                                 self.ack_events[cmd].set()
@@ -1768,6 +1777,20 @@ class SmartUSBHub:
             logger.warning(f"FlexConnect fault detected: 0x{value:02X} ({', '.join(fault_desc)})")
         else:
             logger.debug("FlexConnect no fault detected")
+
+    def _handle_set_flexconnect_default_mode(self):
+        logger.debug("_handle_set_flexconnect_default_mode ACK")
+
+    def _handle_get_flexconnect_default_mode(self, value):
+        logger.debug(f"_handle_get_flexconnect_default_mode ACK, value:{value}")
+        self.flexconnect_default_mode = value
+        mode_names = {
+            FLEXCONNECT_MODE_PC: "PC",
+            FLEXCONNECT_MODE_UDISK1: "UDISK1",
+            FLEXCONNECT_MODE_UDISK2: "UDISK2"
+        }
+        mode_str = mode_names.get(value, f"Unknown({value})")
+        logger.debug(f"FlexConnect default mode: {mode_str} ({value})")
 
     def _handle_set_auto_restore(self):
         logger.debug("_handle_set_auto_restore ACK")
@@ -2930,6 +2953,79 @@ class SmartUSBHub:
             return self.flexconnect_fault_status
         else:
             logger.error("get_flexconnect_fault No ACK!")
+            return None
+
+    @synchronized
+    def set_flexconnect_default_mode(self, mode):
+        """
+        Set the FlexConnect default power-on mode.
+        
+        Args:
+            mode (int): The default mode to set on power-on.
+                - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
+                - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
+                - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                
+        Returns:
+            bool: True if command was acknowledged, False otherwise.
+                
+        Raises:
+            ValueError: If the product is not a FlexConnect product or mode is invalid.
+        """
+        # Check if product is FlexConnect
+        if not self._check_feature_support("flexconnect"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} is not a FlexConnect product. "
+                           f"This method is only available for FlexConnect devices.")
+        
+        # Validate mode (only PC, UDISK1, UDISK2 are valid for default mode, not DISCONNECT)
+        if mode not in [FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2]:
+            raise ValueError(f"Invalid FlexConnect default mode: {mode}. "
+                           f"Valid modes are: FLEXCONNECT_MODE_PC (0), "
+                           f"FLEXCONNECT_MODE_UDISK1 (1), FLEXCONNECT_MODE_UDISK2 (2)")
+        
+        # Send command
+        self._send_packet(CMD_SET_FLEXCONNECT_DEFAULT_MODE, None, mode)
+        if self._wait_for_ack_with_recovery(CMD_SET_FLEXCONNECT_DEFAULT_MODE):
+            logger.debug("set_flexconnect_default_mode ACK")
+            return True
+        else:
+            logger.error("set_flexconnect_default_mode No ACK!")
+            return False
+
+    @synchronized
+    def get_flexconnect_default_mode(self):
+        """
+        Get the FlexConnect default power-on mode.
+        
+        Returns:
+            int or None: The default mode, or None if no response.
+                - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
+                - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
+                - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                
+        Raises:
+            ValueError: If the product is not a FlexConnect product.
+        """
+        # Check if product is FlexConnect
+        if not self._check_feature_support("flexconnect"):
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+            raise ValueError(f"Product {product_name} is not a FlexConnect product. "
+                           f"This method is only available for FlexConnect devices.")
+        
+        # Clear event to avoid stale ACK
+        ack_event = self.ack_events[CMD_GET_FLEXCONNECT_DEFAULT_MODE]
+        ack_event.clear()
+        # Send command
+        self._send_packet(CMD_GET_FLEXCONNECT_DEFAULT_MODE, None, None)
+        # Wait for ACK
+        if ack_event.wait(self.com_timeout):
+            logger.debug("get_flexconnect_default_mode ACK")
+            return self.flexconnect_default_mode
+        else:
+            logger.error("get_flexconnect_default_mode No ACK!")
             return None
 
     @synchronized

@@ -1,154 +1,108 @@
-# SmartUSBHub 集成测试
+# SmartUSBHub 测试套件
 
-本目录包含 SmartUSBHub Python 库的集成测试，直接连接真实设备进行测试。
+本目录包含 SmartUSBHub Python 库的测试，按产品组织，直接连接真实设备进行测试。
 
-## 文档
+## 目录结构
 
-- **[README.md](./README.md)** (本文件) - 快速开始指南
-- **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 📖 **测试文件使用指南（推荐阅读）** - 详细说明每个测试文件的用途、使用方法和注意事项
-
-## 测试结构
-
-### 集成测试（需要硬件）
-- `test_integration.py` - 使用真实 SmartUSBHub 设备的常规集成测试（22个测试）
-- `test_stress_core.py` - 核心功能压力测试（通过大量重复操作验证设备稳定性）
-- `test_flexconnect.py` - FlexConnect模式测试（PC/U盘1/U盘2模式切换）
-
-### 测试运行器
-- `run_integration_tests.py` - 集成测试运行脚本（自动生成HTML报告）
-- `run_stress_tests.py` - 压力测试运行脚本（自动生成HTML报告）
-- `run_flexconnect_tests.py` - FlexConnect测试运行脚本（自动生成HTML报告）
-
-### 配置文件
-- `pytest.ini` - Pytest 配置文件（已配置 HTML 报告）
-- `conftest.py` - Pytest fixtures 配置
+```
+test/
+├── SmartUSBHub_Pro/          # SmartUSBHub Pro 产品测试
+│   ├── test_integration.py   # 接口测试
+│   ├── test_stress.py        # 压力测试
+│   ├── run_tests.py          # 测试运行脚本
+│   └── report/               # 测试报告目录
+├── FlexConnect/              # FlexConnect 产品测试
+│   ├── test_integration.py   # 接口测试
+│   ├── test_stress.py        # 压力测试
+│   ├── run_tests.py          # 测试运行脚本
+│   └── report/               # 测试报告目录
+├── conftest.py               # Pytest fixtures 配置
+├── pytest.ini                # Pytest 配置文件
+├── frame_generate.py         # 协议帧生成工具
+├── report/                   # 通用测试报告目录
+└── README.md                 # 本文件
+```
 
 ## 快速开始
 
-### 运行测试
+### SmartUSBHub Pro 测试
 
-#### 使用 pytest 运行（推荐）：
 ```bash
 # 运行所有测试
-pytest test/test_integration.py -v -s
+python test/SmartUSBHub_Pro/run_tests.py --all
 
-# 运行特定测试
-pytest test/test_integration.py::test_get_device_info -v
+# 只运行接口测试
+python test/SmartUSBHub_Pro/run_tests.py --type integration
 
-# 运行包含关键字的测试
-pytest test/test_integration.py -k "voltage" -v
+# 只运行压力测试
+python test/SmartUSBHub_Pro/run_tests.py --type stress
+
+# 使用pytest直接运行
+pytest test/SmartUSBHub_Pro/test_integration.py -v
+pytest test/SmartUSBHub_Pro/test_stress.py -v
 ```
 
-#### 使用运行脚本：
-```bash
-# 运行所有集成测试
-python test/run_integration_tests.py
-```
-
-### 查看详细日志
+### FlexConnect 测试
 
 ```bash
-# 显示详细日志（推荐）
-pytest test/test_integration.py -v -s --log-cli-level=INFO
+# 运行所有测试
+python test/FlexConnect/run_tests.py --all
+
+# 只运行接口测试
+python test/FlexConnect/run_tests.py --type integration
+
+# 只运行压力测试
+python test/FlexConnect/run_tests.py --type stress
+
+# 使用pytest直接运行
+pytest test/FlexConnect/test_integration.py -v
+pytest test/FlexConnect/test_stress.py -v
 ```
 
-## 测试覆盖
+## 测试类型说明
 
-测试套件覆盖以下功能：
+### 接口测试 (test_integration.py)
+- 测试所有API接口的基本功能
+- 验证设备的基本操作和状态读取
+- 包含错误处理测试
 
-1. **设备连接和基本信息**
-   - 设备连接
-   - 设备信息获取
-   - 版本信息
-   - 序列号获取
+### 压力测试 (test_stress.py)
+- 通过大量重复操作验证设备稳定性
+- 统计成功率和性能指标
+- 生成详细的统计报告
 
-2. **电源控制**
-   - 单通道和多通道电源控制
-   - 电源状态读取
-   - 互锁模式
+## 测试报告
 
-3. **监控功能**
-   - 电压读取
-   - 电流读取
-   - 所有通道监控
+测试运行脚本会自动生成HTML报告，保存在各产品目录的 `report/` 子目录中。
 
-4. **数据线控制**
-   - 数据线连接/断开
-   - 数据线状态读取
+### 安装依赖
 
-5. **充电模式**
-   - 慢充模式
-   - 快充模式
+```bash
+pip install pytest pytest-html
+```
 
-6. **设备设置**
-   - 工作模式（普通/互锁）
-   - 按钮控制
-   - 自动恢复
-   - 设备地址
+### 查看报告
+
+报告会在测试完成后自动在浏览器中打开。如果不想自动打开，使用 `--no-open` 参数：
+
+```bash
+python test/SmartUSBHub_Pro/run_tests.py --no-open
+```
+
+## 详细文档
+
+- **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 测试文件详细使用指南
 
 ## 要求
 
-测试需要：
 - Python 3.9+
 - pytest
+- pytest-html (可选，用于生成HTML报告)
 - 已连接的 SmartUSBHub 设备
 
 ## 注意事项
 
 - 测试需要物理 SmartUSBHub 设备连接
-- 测试结束后会自动清理设备状态（关闭所有通道）
-- 如果设备不支持某些功能（如 ADC），相关测试会自动跳过
+- 测试结束后会自动清理设备状态
+- 如果设备不支持某些功能，相关测试会自动跳过
 - 使用 `module` 级别的 fixture，所有测试共享同一个设备连接
-
-## 生成 HTML 测试报告
-
-### 安装 pytest-html
-
-```bash
-pip install pytest-html
-```
-
-### 使用方法
-
-#### 方法1: 使用运行脚本（推荐，自动生成报告）
-
-```bash
-# 运行常规测试并生成报告
-python test/run_integration_tests.py
-
-# 运行压力测试并生成报告
-python test/run_stress_tests.py
-
-# 不自动打开报告
-python test/run_integration_tests.py --no-open
-python test/run_stress_tests.py --no-open
-```
-
-#### 方法2: 直接使用 pytest
-
-```bash
-# 生成常规测试报告
-pytest test/test_integration.py --html=report.html --self-contained-html
-
-# 生成压力测试报告
-pytest test/test_stress_core.py --html=report.html --self-contained-html
-
-# 生成所有测试报告
-pytest test/ --html=report.html --self-contained-html
-```
-
-报告文件会生成在 `test/report.html`，可以直接在浏览器中打开查看。
-
-### 报告内容
-
-HTML 报告包含：
-- 测试概览（通过/失败/跳过统计）
-- 详细的测试结果列表
-- 每个测试的执行时间
-- 失败测试的错误信息和堆栈跟踪
-- 测试日志输出
-
-## 更多信息
-
-详细的使用说明请参考：
-- **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 📖 **测试文件使用指南** - 详细说明每个测试文件的用途、使用方法和注意事项

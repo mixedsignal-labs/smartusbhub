@@ -6,19 +6,22 @@
 
 ```
 test/
-├── 测试文件 (Test Files)
-│   ├── test_integration.py          # 常规集成测试
-│   ├── test_stress_core.py          # 核心功能压力测试
-│   └── test_flexconnect.py          # FlexConnect模式测试
+├── SmartUSBHub_Pro/                 # SmartUSBHub Pro 产品测试
+│   ├── test_integration.py          # 接口测试
+│   ├── test_stress.py               # 压力测试
+│   ├── run_tests.py                 # 测试运行脚本
+│   └── report/                      # 测试报告目录
 │
-├── 运行脚本 (Runner Scripts)
-│   ├── run_integration_tests.py     # 集成测试运行器（自动生成HTML报告）
-│   └── run_stress_tests.py          # 压力测试运行器（自动生成HTML报告）
+├── FlexConnect/                     # FlexConnect 产品测试
+│   ├── test_integration.py          # 接口测试
+│   ├── test_stress.py               # 压力测试
+│   ├── run_tests.py                 # 测试运行脚本
+│   └── report/                      # 测试报告目录
 │
 ├── 配置文件 (Configuration Files)
 │   ├── conftest.py                  # Pytest fixtures配置
 │   ├── pytest.ini                   # Pytest配置文件
-│   └── __init__.py                  # Python包初始化
+│   └── frame_generate.py            # 协议帧生成工具
 │
 └── 文档文件 (Documentation)
     ├── README.md                    # 快速开始指南
@@ -29,7 +32,9 @@ test/
 
 ## 🧪 测试文件详解
 
-### 1. `test_integration.py` - 常规集成测试
+### SmartUSBHub Pro 产品测试
+
+#### 1. `SmartUSBHub_Pro/test_integration.py` - 接口测试
 
 **用途：** 对 SmartUSBHub 设备进行全面的功能集成测试，验证所有核心功能是否正常工作。
 
@@ -47,20 +52,20 @@ test/
 **运行方法：**
 
 ```bash
-# 方法1: 使用pytest直接运行（推荐）
-pytest test/test_integration.py -v -s
+# 方法1: 使用运行脚本（推荐，自动生成HTML报告）
+python test/SmartUSBHub_Pro/run_tests.py --type integration
 
-# 方法2: 使用运行脚本（自动生成HTML报告）
-python test/run_integration_tests.py
+# 方法2: 使用pytest直接运行
+pytest test/SmartUSBHub_Pro/test_integration.py -v -s
 
 # 方法3: 运行特定测试
-pytest test/test_integration.py::test_get_device_info -v
+pytest test/SmartUSBHub_Pro/test_integration.py::test_get_device_info -v
 
 # 方法4: 运行包含关键字的测试
-pytest test/test_integration.py -k "voltage" -v
+pytest test/SmartUSBHub_Pro/test_integration.py -k "voltage" -v
 
 # 方法5: 显示详细日志
-pytest test/test_integration.py -v -s --log-cli-level=INFO
+pytest test/SmartUSBHub_Pro/test_integration.py -v -s --log-cli-level=INFO
 ```
 
 **参数说明：**
@@ -79,7 +84,7 @@ pytest test/test_integration.py -v -s --log-cli-level=INFO
 
 ---
 
-### 2. `test_stress_core.py` - 核心功能压力测试
+#### 2. `SmartUSBHub_Pro/test_stress.py` - 压力测试
 
 **用途：** 对 SmartUSBHub 设备进行长时间、高强度的压力测试，通过大量重复操作验证设备在长时间运行下的稳定性和可靠性。
 
@@ -99,16 +104,16 @@ pytest test/test_integration.py -v -s --log-cli-level=INFO
 
 ```bash
 # 方法1: 使用运行脚本（推荐，自动生成HTML报告）
-python test/run_stress_tests.py
+python test/SmartUSBHub_Pro/run_tests.py --type stress
 
 # 方法2: 使用pytest直接运行
-pytest test/test_stress_core.py -v -s
+pytest test/SmartUSBHub_Pro/test_stress.py -v -s
 
 # 方法3: 运行但不自动打开报告
-python test/run_stress_tests.py --no-open
+python test/SmartUSBHub_Pro/run_tests.py --type stress --no-open
 
 # 方法4: 运行但不生成HTML报告
-python test/run_stress_tests.py --no-html
+python test/SmartUSBHub_Pro/run_tests.py --type stress --no-html
 ```
 
 **参数说明：**
@@ -125,11 +130,13 @@ python test/run_stress_tests.py --no-html
 
 **预计运行时间：** 约 5-30 分钟（取决于设备响应速度和测试次数配置）
 
-**报告位置：** `test/report_stress.html`
+**报告位置：** `test/SmartUSBHub_Pro/report/report_stress.html`
 
 ---
 
-### 3. `test_flexconnect.py` - FlexConnect模式测试
+### FlexConnect 产品测试
+
+#### 1. `FlexConnect/test_integration.py` - 接口测试
 
 **用途：** 专门测试 FlexConnect 产品的模式切换功能，验证 PC/U盘1/U盘2 三种模式之间的切换是否正常。
 
@@ -139,30 +146,46 @@ python test/run_stress_tests.py --no-html
   - 切换到PC模式
   - 切换到U盘1模式
   - 切换到U盘2模式
+  - 切换到DISCONNECT模式
 - ⚠️ 故障状态检测
 - 🛡️ 错误处理测试
-- 🔁 压力测试（1000次循环）
 
 **运行方法：**
 
 ```bash
-# 方法1: 使用运行脚本（推荐，自动生成HTML报告并打开）
-python test/run_flexconnect_tests.py
+# 方法1: 使用运行脚本（推荐，自动生成HTML报告）
+python test/FlexConnect/run_tests.py --type integration
 
 # 方法2: 使用pytest直接运行
-pytest test/test_flexconnect.py -v
+pytest test/FlexConnect/test_integration.py -v
 
 # 方法3: 运行特定测试类
-pytest test/test_flexconnect.py::TestFlexConnectMode -v
+pytest test/FlexConnect/test_integration.py::TestFlexConnectMode -v
 
 # 方法4: 运行单个测试
-pytest test/test_flexconnect.py::test_get_flexconnect_mode -v
+pytest test/FlexConnect/test_integration.py::TestFlexConnectMode::test_get_flexconnect_mode -v
 
 # 方法5: 运行但不自动打开报告
-python test/run_flexconnect_tests.py --no-open
+python test/FlexConnect/run_tests.py --type integration --no-open
+```
 
-# 方法6: 直接运行（不使用pytest）
-python test/test_flexconnect.py
+#### 2. `FlexConnect/test_stress.py` - 压力测试
+
+**用途：** FlexConnect产品的压力测试，循环测试模式切换和故障检测。
+
+**测试内容：**
+- 🔄 模式切换循环测试（默认10,000次）
+- 📊 实时进度显示和统计信息
+- 📈 HTML报告生成（包含详细统计）
+
+**运行方法：**
+
+```bash
+# 方法1: 使用运行脚本（推荐）
+python test/FlexConnect/run_tests.py --type stress
+
+# 方法2: 使用pytest直接运行
+pytest test/FlexConnect/test_stress.py -v -s
 ```
 
 **注意事项：**
@@ -177,18 +200,26 @@ python test/test_flexconnect.py
 
 ## 🚀 运行脚本详解
 
-### 1. `run_integration_tests.py` - 集成测试运行器
+### SmartUSBHub Pro 运行脚本
 
-**用途：** 便捷运行常规集成测试，自动生成HTML报告并打开浏览器。
+#### `SmartUSBHub_Pro/run_tests.py` - 测试运行器
+
+**用途：** 便捷运行SmartUSBHub Pro测试，自动生成HTML报告并打开浏览器。
 
 **使用方法：**
 
 ```bash
-# 基本用法（自动生成报告并打开）
-python test/run_integration_tests.py
+# 运行所有测试
+python test/SmartUSBHub_Pro/run_tests.py --all
+
+# 只运行接口测试
+python test/SmartUSBHub_Pro/run_tests.py --type integration
+
+# 只运行压力测试
+python test/SmartUSBHub_Pro/run_tests.py --type stress
 
 # 运行但不自动打开报告
-python test/run_integration_tests.py --no-open
+python test/SmartUSBHub_Pro/run_tests.py --all --no-open
 
 # 运行但不生成HTML报告
 python test/run_integration_tests.py --no-html
@@ -210,7 +241,26 @@ python test/run_integration_tests.py --tb=short
 
 ---
 
-### 2. `run_stress_tests.py` - 压力测试运行器
+### FlexConnect 运行脚本
+
+#### `FlexConnect/run_tests.py` - 测试运行器
+
+**用途：** 便捷运行FlexConnect测试，自动生成HTML报告并打开浏览器。
+
+**使用方法：**
+
+```bash
+# 运行所有测试
+python test/FlexConnect/run_tests.py --all
+
+# 只运行接口测试
+python test/FlexConnect/run_tests.py --type integration
+
+# 只运行压力测试
+python test/FlexConnect/run_tests.py --type stress
+
+# 运行但不自动打开报告
+python test/FlexConnect/run_tests.py --all --no-open
 
 **用途：** 便捷运行压力测试，自动生成HTML报告并打开浏览器。
 
@@ -364,7 +414,10 @@ pip install pytest-html
 
 ## 📚 相关文档
 
-- **[README.md](./README.md)** - 快速开始指南
+- **[README.md](./README.md)** - ⭐ 快速开始指南
+- **[TEST_DIRECTORY.md](./TEST_DIRECTORY.md)** - 🗂️ 测试目录结构文档
+- **[FILES_INDEX.md](./FILES_INDEX.md)** - 📂 文件索引（快速查找）
+- **[FILE_ORGANIZATION_PROPOSAL.md](./FILE_ORGANIZATION_PROPOSAL.md)** - 🔧 文件整理建议
 
 ---
 
