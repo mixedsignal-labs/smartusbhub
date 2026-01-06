@@ -38,7 +38,7 @@ from smartusbhub import SmartUSBHub
 logger = logging.getLogger(__name__)
 
 # ==================== 测试次数配置 ====================
-STRESS_TEST_TOTAL_COUNT = 20000
+STRESS_TEST_TOTAL_COUNT = 500000
 
 
 def format_time(seconds):
