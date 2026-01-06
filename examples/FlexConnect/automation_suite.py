@@ -14,10 +14,16 @@ Demo 03: 车机自动化测试演示
 """
 
 import sys
+import os
 import time
 import subprocess
-import os
 from datetime import datetime
+
+# Add project root to sys.path (from examples/FlexConnect/ to project root)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1
 
@@ -40,9 +46,9 @@ class FlexConnectAutomationTester:
             return False
         
         info = self.hub.get_device_info()
-        print(f"✓ 已连接: {info['product_name']}")
-        print(f"  固件版本: {info['firmware_version']}")
-        print(f"  序列号: {info['serial_number']}")
+        print(f"✓ 已连接: {info['product_type']}")
+        print(f"  固件版本: V1.{info['firmware_version']}")
+        print(f"  序列号: {info['serial_no']}")
         
         return True
     

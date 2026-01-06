@@ -14,7 +14,14 @@ Demo 02: 掉电恢复功能演示
 """
 
 import sys
+import os
 import time
+
+# Add project root to sys.path (from examples/FlexConnect/ to project root)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2
 

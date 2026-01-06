@@ -14,7 +14,14 @@ Demo 01: FlexConnect 基础使用示例
 """
 
 import sys
+import os
 import time
+
+# Add project root to sys.path (from examples/FlexConnect/ to project root)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # 导入 SmartUSBHub SDK
 from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2
@@ -45,11 +52,14 @@ def main():
         device_info = hub.get_device_info()
         
         print("\n设备信息:")
-        print(f"  产品名称: {device_info['product_name']}")
-        print(f"  产品类型: 0x{device_info['product_type']:02X}")
-        print(f"  硬件版本: {device_info['hardware_version']}")
-        print(f"  固件版本: {device_info['firmware_version']}")
-        print(f"  序列号: {device_info['serial_number']}")
+        print(f"  产品名称: {device_info['product_type']}")
+        if hub.product_type is not None:
+            print(f"  产品类型ID: 0x{hub.product_type:02X}")
+        else:
+            print("  产品类型ID: N/A")
+        print(f"  硬件版本: V1.{device_info['hardware_version']}")
+        print(f"  固件版本: V1.{device_info['firmware_version']}")
+        print(f"  序列号: {device_info['serial_no']}")
         
         # ========== 步骤3: 获取当前状态 ==========
         print("\n[步骤3] 获取当前状态...")
@@ -66,7 +76,7 @@ def main():
         auto_restore = hub.get_auto_restore_status()
         print(f"  掉电恢复: {'已启用' if auto_restore == 1 else '已禁用'}")
         
-        button_status = hub.get_button_mode()
+        button_status = hub.get_button_control_status()
         print(f"  按键控制: {'已启用' if button_status == 1 else '已禁用'}")
         
         # ========== 步骤4: 模式切换演示 ==========
