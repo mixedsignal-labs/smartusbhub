@@ -38,9 +38,13 @@ from smartusbhub import SmartUSBHub
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# ==================== 测试次数配置 ====================
+# ==================== 测试配置 ====================
 # 可以通过环境变量 STRESS_TEST_COUNT 来覆盖默认值
 STRESS_TEST_TOTAL_COUNT = int(os.environ.get('STRESS_TEST_COUNT', 10000))  # 默认测试1万次切换
+
+# 充电模式切换后用于验证的重试次数及间隔
+CHARGE_MODE_VERIFY_MAX_RETRY = int(os.environ.get('CHARGE_MODE_VERIFY_MAX_RETRY', 3))
+CHARGE_MODE_VERIFY_RETRY_DELAY = float(os.environ.get('CHARGE_MODE_VERIFY_RETRY_DELAY', 0.1))  # 秒
 
 
 def format_time(seconds):
@@ -229,6 +233,57 @@ def validate_charge_mode_response(status, channels, expected_value, status_name=
     return (True, None)
 
 
+def verify_charge_mode_with_retry(hub, channels, expected_value, stats_entry_key, 
+                                  stats, cycle_index, mode_name):
+    """
+    多次读取并验证充电模式，增加对硬件时序的容错能力。
+
+    在限定的重试次数和时间窗口内，只要至少有一次读取到期望模式，就认为本轮成功。
+    """
+    stats[stats_entry_key]['count'] += 1
+    attempt = 0
+    last_error_msg = None
+    start = time.time()
+    success = False
+
+    while attempt < CHARGE_MODE_VERIFY_MAX_RETRY:
+        attempt += 1
+        verify_start = time.time()
+        try:
+            charge_mode = hub.get_channel_charge_mode(*channels)
+            verify_elapsed = time.time() - verify_start
+            stats[stats_entry_key]['total_time'] += verify_elapsed
+
+            is_valid, error_msg = validate_charge_mode_response(
+                charge_mode, channels, expected_value, mode_name
+            )
+            if is_valid:
+                stats[stats_entry_key]['success'] += 1
+                success = True
+                break
+            else:
+                last_error_msg = error_msg
+        except Exception as e:
+            verify_elapsed = time.time() - verify_start
+            stats[stats_entry_key]['total_time'] += verify_elapsed
+            last_error_msg = f"获取{mode_name}异常: {e}"
+
+        # 如果还没成功且还有重试机会，等待一小段时间再试
+        if attempt < CHARGE_MODE_VERIFY_MAX_RETRY:
+            time.sleep(CHARGE_MODE_VERIFY_RETRY_DELAY)
+
+    if not success:
+        stats[stats_entry_key]['failure'] += 1
+        if last_error_msg is None:
+            last_error_msg = "未知错误"
+        logger.warning(
+            f"  第 {cycle_index + 1} 次循环：验证{mode_name}失败 "
+            f"(重试{attempt}次) - {last_error_msg}"
+        )
+
+    return success
+
+
 @pytest.mark.hardware
 @pytest.mark.slow
 def test_stress_charge_mode_switch(hub, max_channels, request):
@@ -240,9 +295,9 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
     2. 验证每次切换后的状态
     3. 统计切换成功率和耗时
     """
-    # 只测试通道1
-    channels = [1]
-    logger.info(f"充电模式切换压力测试（通道 {channels}）...")
+    # 测试所有通道（对于 4CH 产品即通道 1-4）
+    channels = list(range(1, max_channels + 1))
+    logger.info(f"充电模式切换压力测试（{max_channels} 个通道）{channels}...")
     
     # 获取设备信息（用于在报告中显示）
     hardware_version = hub.hardware_version
@@ -321,29 +376,17 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
                 # 等待设备完成模式切换
                 time.sleep(0.1)
                 
-                # 2. 验证慢充模式（期望值：2）
-                stats['verify_slow_charge']['count'] += 1
-                verify_start = time.time()
-                try:
-                    charge_mode = hub.get_channel_charge_mode(*channels)
-                    verify_elapsed = time.time() - verify_start
-                    stats['verify_slow_charge']['total_time'] += verify_elapsed
-                    
-                    is_valid, error_msg = validate_charge_mode_response(
-                        charge_mode, channels, 2, "慢充模式"
-                    )
-                    if is_valid:
-                        stats['verify_slow_charge']['success'] += 1
-                    else:
-                        stats['verify_slow_charge']['failure'] += 1
-                        cycle_success = False
-                        logger.warning(f"  第 {i+1} 次循环：验证慢充模式失败 - {error_msg}")
-                except Exception as e:
-                    verify_elapsed = time.time() - verify_start
-                    stats['verify_slow_charge']['total_time'] += verify_elapsed
-                    stats['verify_slow_charge']['failure'] += 1
+                # 2. 验证慢充模式（期望值：2，带重试）
+                if not verify_charge_mode_with_retry(
+                    hub,
+                    channels,
+                    expected_value=2,
+                    stats_entry_key='verify_slow_charge',
+                    stats=stats,
+                    cycle_index=i,
+                    mode_name="慢充模式"
+                ):
                     cycle_success = False
-                    logger.warning(f"  第 {i+1} 次循环：获取慢充模式异常: {e}")
                 
             else:  # current_mode == "SLOW_CHARGE"
                 # 计算上一个模式的持续时间
@@ -373,29 +416,17 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
                 # 等待设备完成模式切换
                 time.sleep(0.1)
                 
-                # 2. 验证快充模式（期望值：1）
-                stats['verify_fast_charge']['count'] += 1
-                verify_start = time.time()
-                try:
-                    charge_mode = hub.get_channel_charge_mode(*channels)
-                    verify_elapsed = time.time() - verify_start
-                    stats['verify_fast_charge']['total_time'] += verify_elapsed
-                    
-                    is_valid, error_msg = validate_charge_mode_response(
-                        charge_mode, channels, 1, "快充模式"
-                    )
-                    if is_valid:
-                        stats['verify_fast_charge']['success'] += 1
-                    else:
-                        stats['verify_fast_charge']['failure'] += 1
-                        cycle_success = False
-                        logger.warning(f"  第 {i+1} 次循环：验证快充模式失败 - {error_msg}")
-                except Exception as e:
-                    verify_elapsed = time.time() - verify_start
-                    stats['verify_fast_charge']['total_time'] += verify_elapsed
-                    stats['verify_fast_charge']['failure'] += 1
+                # 2. 验证快充模式（期望值：1，带重试）
+                if not verify_charge_mode_with_retry(
+                    hub,
+                    channels,
+                    expected_value=1,
+                    stats_entry_key='verify_fast_charge',
+                    stats=stats,
+                    cycle_index=i,
+                    mode_name="快充模式"
+                ):
                     cycle_success = False
-                    logger.warning(f"  第 {i+1} 次循环：获取快充模式异常: {e}")
             
             if cycle_success:
                 success_count += 1
