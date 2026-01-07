@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 """
-FlexConnect 测试运行脚本
+SmartUSBHub Pro 充电模式切换压力测试运行脚本
 
 使用方法:
-    python FlexConnect/run_tests.py --type integration    # 运行接口测试
-    python FlexConnect/run_tests.py --type stress         # 运行压力测试
-    python FlexConnect/run_tests.py --all                # 运行所有测试
-    python FlexConnect/run_tests.py --no-open            # 不自动打开报告
+    python test/SmartUSBHub_Pro/run_stress_charge_mode.py                # 运行测试并自动打开报告
+    python test/SmartUSBHub_Pro/run_stress_charge_mode.py --no-open     # 运行测试但不打开报告
+    python test/SmartUSBHub_Pro/run_stress_charge_mode.py --no-html     # 运行测试但不生成HTML报告
 """
 import sys
 import os
@@ -20,30 +19,29 @@ if project_root not in sys.path:
 if __name__ == '__main__':
     import pytest
     
-    parser = argparse.ArgumentParser(description="运行 FlexConnect 测试")
-    parser.add_argument("--type", choices=["integration", "stress", "all"], default="all",
-                       help="测试类型: integration(接口测试), stress(压力测试), all(全部)")
+    parser = argparse.ArgumentParser(description="运行 SmartUSBHub Pro 充电模式切换压力测试")
     parser.add_argument("--no-open", action="store_true", help="不自动打开HTML报告")
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
+    parser.add_argument("--count", type=int, help="测试次数（覆盖默认值）")
     args, pytest_args = parser.parse_known_args()
+    
+    # 如果指定了测试次数，通过环境变量传递
+    if args.count:
+        os.environ['STRESS_TEST_COUNT'] = str(args.count)
     
     # 确定测试文件
     test_dir = os.path.dirname(os.path.abspath(__file__))
-    if args.type == "integration":
-        test_files = [os.path.join(test_dir, "test_integration.py")]
-        report_name = "report_integration.html"
-    elif args.type == "stress":
-        test_files = [os.path.join(test_dir, "test_stress.py")]
-        report_name = "report_stress.html"
-    else:  # all
-        test_files = [
-            os.path.join(test_dir, "test_integration.py"),
-            os.path.join(test_dir, "test_stress.py")
-        ]
-        report_name = "report_all.html"
+    test_file = os.path.join(test_dir, "test_stress_charge_mode_switch.py")
+    report_name = "report_stress_charge_mode.html"
+    
+    # 检查测试文件是否存在
+    if not os.path.exists(test_file):
+        print(f"[ERROR] 测试文件不存在: {test_file}")
+        sys.exit(1)
     
     # 默认参数
-    test_args = test_files + [
+    test_args = [
+        test_file,
         '-v',                    # 详细输出
         '-s',                    # 显示print输出
         '--log-cli-level=INFO',  # 日志级别
@@ -77,8 +75,11 @@ if __name__ == '__main__':
         print("  安装命令: pip install pytest-html")
     
     print("\n" + "="*70)
-    print(f"开始运行 FlexConnect 测试 ({args.type})...")
-    print("="*70 + "\n")
+    print("SmartUSBHub Pro - 充电模式切换压力测试")
+    print("="*70)
+    if args.count:
+        print(f"测试次数: {args.count}")
+    print()
     
     exit_code = pytest.main(test_args)
     

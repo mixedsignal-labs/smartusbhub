@@ -3,10 +3,11 @@
 SmartUSBHub Pro 测试运行脚本
 
 使用方法:
-    python SmartUSBHub_Pro/run_tests.py --type integration    # 运行接口测试
-    python SmartUSBHub_Pro/run_tests.py --type stress         # 运行压力测试
-    python SmartUSBHub_Pro/run_tests.py --all                # 运行所有测试
-    python SmartUSBHub_Pro/run_tests.py --no-open            # 不自动打开报告
+    python SmartUSBHub_Pro/run_tests.py --type integration          # 运行接口测试
+    python SmartUSBHub_Pro/run_tests.py --type stress               # 运行核心功能压力测试
+    python SmartUSBHub_Pro/run_tests.py --type stress_charge_mode   # 运行充电模式切换压力测试
+    python SmartUSBHub_Pro/run_tests.py --all                      # 运行所有测试
+    python SmartUSBHub_Pro/run_tests.py --no-open                  # 不自动打开报告
 """
 import sys
 import os
@@ -21,8 +22,10 @@ if __name__ == '__main__':
     import pytest
     
     parser = argparse.ArgumentParser(description="运行 SmartUSBHub Pro 测试")
-    parser.add_argument("--type", choices=["integration", "stress", "all"], default="all",
-                       help="测试类型: integration(接口测试), stress(压力测试), all(全部)")
+    parser.add_argument("--type", 
+                       choices=["integration", "stress", "stress_charge_mode", "all"], 
+                       default="all",
+                       help="测试类型: integration(接口测试), stress(核心功能压力测试), stress_charge_mode(充电模式切换压力测试), all(全部)")
     parser.add_argument("--no-open", action="store_true", help="不自动打开HTML报告")
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
     args, pytest_args = parser.parse_known_args()
@@ -35,10 +38,14 @@ if __name__ == '__main__':
     elif args.type == "stress":
         test_files = [os.path.join(test_dir, "test_stress.py")]
         report_name = "report_stress.html"
+    elif args.type == "stress_charge_mode":
+        test_files = [os.path.join(test_dir, "test_stress_charge_mode_switch.py")]
+        report_name = "report_stress_charge_mode.html"
     else:  # all
         test_files = [
             os.path.join(test_dir, "test_integration.py"),
-            os.path.join(test_dir, "test_stress.py")
+            os.path.join(test_dir, "test_stress.py"),
+            os.path.join(test_dir, "test_stress_charge_mode_switch.py")
         ]
         report_name = "report_all.html"
     
