@@ -7,31 +7,24 @@
 ```
 examples/
 ├── SmartUSBHub_Pro/          # SmartUSBHub Pro 产品示例
-│   ├── 基础示例
-│   │   ├── setting_example.py              # 基础设置和信息查询
-│   │   ├── power_control_example.py        # 电源控制示例
-│   │   ├── dataline_control_example.py      # 数据线控制示例
-│   │   └── user_callback_example.py        # 用户回调示例
-│   ├── 监控示例
-│   │   ├── voltage_monitor_example.py       # 电压监控示例
-│   │   └── current_monitor_example.py       # 电流监控示例
-│   ├── 充电模式示例
-│   │   ├── charge_mode_toggle_demo.py       # 充电模式切换演示
-│   │   ├── battery_test_example.py         # 电池测试示例
-│   │   └── auto_charge_mode_switch.py      # 自动充电模式切换
-│   ├── 高级示例
-│   │   ├── multi_device_channel_control.py # 多设备通道控制
-│   │   └── oscilloscope.py                 # 示波器应用
-│   └── 特殊应用
-│       └── iphone_power_test/              # iPhone电源测试
+│   ├── setting_example.py              # 基础设置和信息查询
+│   ├── power_control_example.py        # 电源控制示例
+│   ├── dataline_control_example.py     # 数据线控制示例
+│   ├── user_callback_example.py         # 用户回调示例
+│   ├── voltage_monitor_example.py      # 电压监控示例
+│   ├── current_monitor_example.py      # 电流监控示例
+│   ├── auto_charge_mode_switch.py      # 自动充电模式切换
+│   ├── multi_device_channel_control.py # 多设备通道控制
+│   └── oscilloscope.py                 # 示波器应用
 │
 ├── FlexConnect/              # FlexConnect 产品示例
-│   ├── flexconnect_mode_switch_demo.py     # 模式切换演示
-│   └── diagnose_params.py                  # 参数诊断工具
+│   ├── basic_usage.py                   # 基础使用入门
+│   ├── flexconnect_mode_switch_demo.py  # 模式切换演示
+│   └── diagnose_params.py               # 参数诊断工具
 │
 └── Common/                   # 通用示例和工具
-    ├── simple_serial.py                     # 简单串口通信
-    └── multiprocess_architecture/          # 多进程架构
+    ├── simple_serial.py                 # 简单串口通信
+    └── multiprocess_architecture/       # 多进程架构
 ```
 
 ## 快速开始
@@ -67,12 +60,6 @@ python examples/SmartUSBHub_Pro/current_monitor_example.py
 #### 充电模式示例
 
 ```bash
-# 充电模式切换演示
-python examples/SmartUSBHub_Pro/charge_mode_toggle_demo.py
-
-# 电池测试示例
-python examples/SmartUSBHub_Pro/battery_test_example.py
-
 # 自动充电模式切换
 python examples/SmartUSBHub_Pro/auto_charge_mode_switch.py
 ```
@@ -90,6 +77,9 @@ python examples/SmartUSBHub_Pro/oscilloscope.py
 ### FlexConnect 示例
 
 ```bash
+# 基础使用入门
+python examples/FlexConnect/basic_usage.py
+
 # 模式切换演示
 python examples/FlexConnect/flexconnect_mode_switch_demo.py
 
@@ -260,47 +250,26 @@ python examples/SmartUSBHub_Pro/current_monitor_example.py
 
 #### 充电模式示例
 
-##### charge_mode_toggle_demo.py - 充电模式切换演示
+##### auto_charge_mode_switch.py - 自动充电模式切换
 
-**功能：** 定时在快充和慢充模式之间切换。
+**功能：** 自动在快充和慢充模式之间循环切换，并统计切换结果。
 
 **运行方法：**
 ```bash
-python examples/SmartUSBHub_Pro/charge_mode_toggle_demo.py
+python examples/SmartUSBHub_Pro/auto_charge_mode_switch.py
 ```
 
 **现象效果：**
 1. 扫描并连接设备
-2. 每 4 秒在快充和慢充模式之间切换一次
+2. 自动在快充和慢充模式之间循环切换
 3. 显示当前充电模式
-4. 统计 "No ACK" 错误次数
+4. 统计切换成功率和错误次数
 5. 按 `Ctrl+C` 退出时显示统计信息
 
 **适用场景：**
 - 演示充电模式切换功能
 - 测试充电模式稳定性
 - 验证快充/慢充切换
-
----
-
-##### battery_test_example.py - 电池测试示例
-
-**功能：** 电池充放电测试。
-
-**运行方法：**
-```bash
-python examples/SmartUSBHub_Pro/battery_test_example.py
-```
-
-**现象效果：**
-- 演示电池充放电测试流程
-- 控制电源开关进行充放电循环
-- 监控电压和电流变化
-
-**适用场景：**
-- 电池充放电测试
-- 验证充电功能
-- 测试电池管理
 
 ---
 
@@ -322,7 +291,6 @@ python examples/SmartUSBHub_Pro/multi_device_channel_control.py
    - 按照设备顺序，依次打开每个设备的每个通道
    - 每个通道打开后保持一段时间
    - 然后关闭，继续下一个通道
-   - 由于每个通道有指示灯，会形成流水灯视觉效果（但这不是主要目的）
 4. 支持多个设备串联，统一控制所有通道
 5. 按 `Ctrl+C` 退出时，自动关闭所有通道
 
@@ -356,35 +324,32 @@ python examples/SmartUSBHub_Pro/oscilloscope.py
 
 ---
 
-#### 特殊应用
+### FlexConnect 示例
 
-##### iphone_power_test/ - iPhone电源测试
+#### basic_usage.py - 基础使用入门
 
-**功能：** iPhone 电源循环测试和电池监控。
-
-**文件：**
-- `iphone_power_cycle_test.py` - iPhone 电源循环测试
-- `battery_plotter.py` - 电池数据绘图工具
+**功能：** 演示 FlexConnect 产品的基本使用方法。
 
 **运行方法：**
 ```bash
-python examples/SmartUSBHub_Pro/iphone_power_test/iphone_power_cycle_test.py
+python examples/FlexConnect/basic_usage.py
 ```
 
-**现象效果：**
-- 对 iPhone 进行电源循环测试
-- 监控电池状态
-- 记录测试数据
-- 生成测试报告
+**演示内容：**
+1. 扫描并连接设备
+2. 获取设备信息（型号、版本、序列号等）
+3. 查询当前状态（模式、掉电恢复、按键状态、设备地址）
+4. 设备地址设置和获取演示
+5. 模式切换演示（PC 模式 ↔ U 盘模式）
+6. 验证切换结果
 
 **适用场景：**
-- iPhone 电源测试
-- 电池充放电测试
-- 设备兼容性测试
+- 快速入门和学习
+- 验证设备连接
+- 基本功能测试
+- 学习 API 使用方法
 
 ---
-
-### FlexConnect 示例
 
 #### flexconnect_mode_switch_demo.py - 模式切换演示
 
@@ -502,7 +467,7 @@ python examples/Common/multiprocess_architecture/run_all.py
 - 电流监控：`SmartUSBHub_Pro/current_monitor_example.py`
 
 ### 5. 特殊功能
-- 充电模式：`SmartUSBHub_Pro/charge_mode_toggle_demo.py`
+- 充电模式：`SmartUSBHub_Pro/auto_charge_mode_switch.py`
 - FlexConnect模式：`FlexConnect/flexconnect_mode_switch_demo.py`
 
 ---
