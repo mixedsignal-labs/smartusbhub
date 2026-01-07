@@ -128,7 +128,7 @@ Examples:
         })
         
         # Get and display charge mode status
-        charge_modes = hub.get_channel_charge_mode(args.channels[0])
+        charge_modes = hub.get_channel_charge_mode(*args.channels)
         if charge_modes:
             for ch, mode_val in charge_modes.items():
                 if ch in args.channels:
@@ -208,7 +208,7 @@ Examples:
             mode_start_time = time.time()
             
             # Get and display charge mode status
-            charge_modes = hub.get_channel_charge_mode(args.channels[0])
+            charge_modes = hub.get_channel_charge_mode(*args.channels)
             if charge_modes:
                 for ch, mode_val in charge_modes.items():
                     if ch in args.channels:

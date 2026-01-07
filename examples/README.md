@@ -20,7 +20,7 @@ examples/
 │   │   ├── battery_test_example.py         # 电池测试示例
 │   │   └── auto_charge_mode_switch.py      # 自动充电模式切换
 │   ├── 高级示例
-│   │   ├── multi_device_chasing_light.py   # 多设备流水灯效果
+│   │   ├── multi_device_channel_control.py # 多设备通道控制
 │   │   └── oscilloscope.py                 # 示波器应用
 │   └── 特殊应用
 │       └── iphone_power_test/              # iPhone电源测试
@@ -80,8 +80,8 @@ python examples/SmartUSBHub_Pro/auto_charge_mode_switch.py
 #### 高级示例
 
 ```bash
-# 多设备流水灯效果
-python examples/SmartUSBHub_Pro/multi_device_chasing_light.py
+# 多设备通道控制
+python examples/SmartUSBHub_Pro/multi_device_channel_control.py
 
 # 示波器应用（图形界面）
 python examples/SmartUSBHub_Pro/oscilloscope.py
@@ -306,29 +306,29 @@ python examples/SmartUSBHub_Pro/battery_test_example.py
 
 #### 高级示例
 
-##### multi_device_chasing_light.py - 多设备流水灯效果
+##### multi_device_channel_control.py - 多设备通道控制
 
-**功能：** 扫描并连接所有可用的 SmartUSBHub 设备，实现流水灯效果。
+**功能：** 扫描并连接所有可用的 SmartUSBHub 设备，统一控制所有设备的通道（端口）。
 
 **运行方法：**
 ```bash
-python examples/SmartUSBHub_Pro/multi_device_chasing_light.py
+python examples/SmartUSBHub_Pro/multi_device_channel_control.py
 ```
 
 **现象效果：**
 1. 自动扫描并连接所有可用的设备
 2. 显示每个设备的信息（端口、地址、硬件版本、固件版本）
-3. 实现流水灯效果：
+3. 多设备通道控制演示：
    - 按照设备顺序，依次打开每个设备的每个通道
    - 每个通道打开后保持一段时间
    - 然后关闭，继续下一个通道
-   - 形成流水灯效果
-4. 支持多个设备串联，形成更长的流水灯效果
+   - 由于每个通道有指示灯，会形成流水灯视觉效果（但这不是主要目的）
+4. 支持多个设备串联，统一控制所有通道
 5. 按 `Ctrl+C` 退出时，自动关闭所有通道
 
 **适用场景：**
-- 演示多设备控制
-- 创建视觉效果展示
+- 演示多设备端口控制
+- 学习多设备统一控制方法
 - 测试多设备协同工作
 
 ---
@@ -495,7 +495,7 @@ python examples/Common/multiprocess_architecture/run_all.py
 运行 `SmartUSBHub_Pro/power_control_example.py` 学习基本的电源控制 API。
 
 ### 3. 多设备控制
-如果有多个设备，可以运行 `SmartUSBHub_Pro/multi_device_chasing_light.py` 查看多设备控制效果。
+如果有多个设备，可以运行 `SmartUSBHub_Pro/multi_device_channel_control.py` 查看多设备控制效果。
 
 ### 4. 实时监控
 - 电压监控：`SmartUSBHub_Pro/voltage_monitor_example.py`
@@ -557,4 +557,4 @@ A: 直接编辑示例文件，修改相应的参数（如延迟时间、迭代�
 
 ---
 
-**最后更新：** 2024-12-28
+**最后更新：** 2026-01-07

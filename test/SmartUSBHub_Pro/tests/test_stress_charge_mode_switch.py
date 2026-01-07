@@ -29,7 +29,7 @@ except ImportError:
     HTML_AVAILABLE = False
 
 # 在源码仓库中，需要将项目根目录添加到路径（从产品子目录）
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -41,10 +41,6 @@ logger = logging.getLogger(__name__)
 # ==================== 测试配置 ====================
 # 可以通过环境变量 STRESS_TEST_COUNT 来覆盖默认值
 STRESS_TEST_TOTAL_COUNT = int(os.environ.get('STRESS_TEST_COUNT', 10000))  # 默认测试1万次切换
-
-# 充电模式切换后用于验证的重试次数及间隔
-CHARGE_MODE_VERIFY_MAX_RETRY = int(os.environ.get('CHARGE_MODE_VERIFY_MAX_RETRY', 3))
-CHARGE_MODE_VERIFY_RETRY_DELAY = float(os.environ.get('CHARGE_MODE_VERIFY_RETRY_DELAY', 0.1))  # 秒
 
 
 def format_time(seconds):
@@ -233,52 +229,41 @@ def validate_charge_mode_response(status, channels, expected_value, status_name=
     return (True, None)
 
 
-def verify_charge_mode_with_retry(hub, channels, expected_value, stats_entry_key, 
-                                  stats, cycle_index, mode_name):
+def verify_charge_mode(hub, channels, expected_value, stats_entry_key, 
+                       stats, cycle_index, mode_name):
     """
-    多次读取并验证充电模式，增加对硬件时序的容错能力。
-
-    在限定的重试次数和时间窗口内，只要至少有一次读取到期望模式，就认为本轮成功。
+    验证充电模式状态
     """
     stats[stats_entry_key]['count'] += 1
-    attempt = 0
-    last_error_msg = None
-    start = time.time()
+    verify_start = time.time()
     success = False
+    last_error_msg = None
+    
+    try:
+        charge_mode = hub.get_channel_charge_mode(*channels)
+        verify_elapsed = time.time() - verify_start
+        stats[stats_entry_key]['total_time'] += verify_elapsed
 
-    while attempt < CHARGE_MODE_VERIFY_MAX_RETRY:
-        attempt += 1
-        verify_start = time.time()
-        try:
-            charge_mode = hub.get_channel_charge_mode(*channels)
-            verify_elapsed = time.time() - verify_start
-            stats[stats_entry_key]['total_time'] += verify_elapsed
-
-            is_valid, error_msg = validate_charge_mode_response(
-                charge_mode, channels, expected_value, mode_name
-            )
-            if is_valid:
-                stats[stats_entry_key]['success'] += 1
-                success = True
-                break
-            else:
-                last_error_msg = error_msg
-        except Exception as e:
-            verify_elapsed = time.time() - verify_start
-            stats[stats_entry_key]['total_time'] += verify_elapsed
-            last_error_msg = f"获取{mode_name}异常: {e}"
-
-        # 如果还没成功且还有重试机会，等待一小段时间再试
-        if attempt < CHARGE_MODE_VERIFY_MAX_RETRY:
-            time.sleep(CHARGE_MODE_VERIFY_RETRY_DELAY)
+        is_valid, error_msg = validate_charge_mode_response(
+            charge_mode, channels, expected_value, mode_name
+        )
+        if is_valid:
+            stats[stats_entry_key]['success'] += 1
+            success = True
+        else:
+            last_error_msg = error_msg
+            stats[stats_entry_key]['failure'] += 1
+    except Exception as e:
+        verify_elapsed = time.time() - verify_start
+        stats[stats_entry_key]['total_time'] += verify_elapsed
+        last_error_msg = f"获取{mode_name}异常: {e}"
+        stats[stats_entry_key]['failure'] += 1
 
     if not success:
-        stats[stats_entry_key]['failure'] += 1
         if last_error_msg is None:
             last_error_msg = "未知错误"
         logger.warning(
-            f"  第 {cycle_index + 1} 次循环：验证{mode_name}失败 "
-            f"(重试{attempt}次) - {last_error_msg}"
+            f"  第 {cycle_index + 1} 次循环：验证{mode_name}失败 - {last_error_msg}"
         )
 
     return success
@@ -336,6 +321,9 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
     slow_charge_time = 0.0
     mode_start_time = time.time()
     
+    # 切换历史记录（基于 demo 风格）
+    switch_history = []
+    
     # 初始化进度显示
     print_progress(0, total_operations, 0, 0, start_time, fast_charge_count, slow_charge_count)
     
@@ -343,9 +331,30 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
     current_mode = "FAST_CHARGE"
     fast_charge_count = 1
     
+    # 记录初始模式（基于 demo 风格）
+    switch_history.append({
+        'timestamp': datetime.now(),
+        'switch_num': 0,
+        'mode': 'FAST_CHARGE',
+        'action': 'Initial',
+        'success': True
+    })
+    
+    # 显示初始模式状态（基于 demo 风格）
+    logger.info(f"初始模式 / 初始模式: {current_mode}")
+    charge_modes = hub.get_channel_charge_mode(*channels)
+    if charge_modes:
+        for ch, mode_val in charge_modes.items():
+            if ch in channels:
+                mode_str = "off" if mode_val == 0 else ("fast_charge" if mode_val == 1 else "slow_charge")
+                logger.info(f"  Channel {ch} / 通道 {ch}: {mode_str} ({mode_val})")
+    logger.info("")
+    
     try:
         for i in range(total_operations):
             cycle_success = True
+            switch_timestamp = datetime.now()
+            mode_duration = 0.0  # 初始化，避免未定义错误
             
             # 切换模式
             if current_mode == "FAST_CHARGE":
@@ -376,8 +385,8 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
                 # 等待设备完成模式切换
                 time.sleep(0.1)
                 
-                # 2. 验证慢充模式（期望值：2，带重试）
-                if not verify_charge_mode_with_retry(
+                # 2. 验证慢充模式（期望值：2）
+                if not verify_charge_mode(
                     hub,
                     channels,
                     expected_value=2,
@@ -416,8 +425,8 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
                 # 等待设备完成模式切换
                 time.sleep(0.1)
                 
-                # 2. 验证快充模式（期望值：1，带重试）
-                if not verify_charge_mode_with_retry(
+                # 2. 验证快充模式（期望值：1）
+                if not verify_charge_mode(
                     hub,
                     channels,
                     expected_value=1,
@@ -432,6 +441,16 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
                 success_count += 1
             else:
                 failure_count += 1
+            
+            # 记录切换历史（基于 demo 风格：记录失败和里程碑）
+            if not cycle_success or (i + 1) % 1000 == 0:
+                switch_history.append({
+                    'timestamp': switch_timestamp,
+                    'switch_num': i + 1,
+                    'mode': current_mode,
+                    'previous_duration': mode_duration,
+                    'success': cycle_success
+                })
             
             # 更新进度
             print_progress(i + 1, total_operations, success_count, failure_count, start_time, 
@@ -518,6 +537,21 @@ def test_stress_charge_mode_switch(hub, max_channels, request):
             logger.info(f"  {op_name:<20s} {stat['success']:>8d} {stat['failure']:>8d} {total_op:>8d} {op_success_rate:>9.2f}% {avg_time:>11.2f}ms")
         else:
             logger.info(f"  {op_name:<20s} {'未执行':>8s}")
+    
+    logger.info("")
+    
+    # 显示切换历史（基于 demo 风格）
+    if switch_history:
+        logger.info("切换历史 / 切换历史 (Failures and Milestones / 失败和里程碑):")
+        logger.info("-" * 70)
+        for switch in switch_history:
+            if switch['switch_num'] == 0:
+                logger.info(f"  #{switch['switch_num']:3d} [{switch['timestamp'].strftime('%H:%M:%S')}] {switch['action']:8s} -> {switch['mode']:12s}")
+            else:
+                prev_dur = switch.get('previous_duration', 0)
+                status = "✓" if switch['success'] else "✗"
+                logger.info(f"  #{switch['switch_num']:3d} [{switch['timestamp'].strftime('%H:%M:%S')}] {status} Switch / 切换 -> {switch['mode']:12s} (previous / 上一次: {format_time(prev_dur)})")
+        logger.info("-" * 70)
     
     logger.info("=" * 70)
     

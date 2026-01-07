@@ -28,7 +28,7 @@ except ImportError:
     HTML_AVAILABLE = False
 
 # 在源码仓库中，需要将项目根目录添加到路径（从产品子目录）
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 

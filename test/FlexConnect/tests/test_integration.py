@@ -5,7 +5,8 @@ FlexConnect 接口测试
 1. set_flexconnect_mode() - 设置模式
 2. get_flexconnect_mode() - 获取模式
 3. get_flexconnect_fault() - 获取故障状态
-4. 错误处理测试
+4. set_device_address() / get_device_address() - 设备地址设置和获取
+5. 错误处理测试
 
 使用方法:
     # 运行接口测试
@@ -21,7 +22,7 @@ import os
 import logging
 
 # 添加项目根目录到路径（从产品子目录）
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -294,3 +295,52 @@ class TestFlexConnectErrorHandling:
             hub.get_flexconnect_fault()
         
         hub.disconnect()
+
+
+class TestDeviceAddress:
+    """设备地址测试（所有产品都支持）"""
+    
+    def test_get_device_address(self, flexconnect_hub):
+        """测试获取设备地址"""
+        address = flexconnect_hub.get_device_address()
+        assert address is not None, "Failed to get device address"
+        assert isinstance(address, int), f"Address should be int, but got {type(address)}"
+        assert 0 <= address <= 0xFFFF, f"Address should be 0-0xFFFF, but got 0x{address:04X}"
+        logger.info(f"Current device address: 0x{address:04X}")
+    
+    def test_set_device_address(self, flexconnect_hub):
+        """测试设置设备地址"""
+        # 获取原始地址
+        original_address = flexconnect_hub.get_device_address()
+        logger.info(f"Original device address: 0x{original_address:04X}")
+        
+        # 设置新地址
+        new_address = 0x0001
+        logger.info(f"Setting device address to 0x{new_address:04X}...")
+        result = flexconnect_hub.set_device_address(new_address)
+        assert result is True, "Failed to set device address"
+        time.sleep(0.2)  # 等待命令完成
+        
+        # 验证地址
+        address = flexconnect_hub.get_device_address()
+        assert address == new_address, f"Address should be 0x{new_address:04X}, but got 0x{address:04X}"
+        logger.info(f"✓ Device address set successfully to 0x{address:04X}")
+        
+        # 恢复原始地址
+        logger.info(f"Restoring original device address: 0x{original_address:04X}...")
+        result = flexconnect_hub.set_device_address(original_address)
+        assert result is True, "Failed to restore original device address"
+        time.sleep(0.2)
+        
+        # 验证恢复
+        address = flexconnect_hub.get_device_address()
+        assert address == original_address, f"Address should be restored to 0x{original_address:04X}, but got 0x{address:04X}"
+        logger.info(f"✓ Device address restored to 0x{address:04X}")
+    
+    def test_set_device_address_invalid(self, flexconnect_hub):
+        """测试设置无效的设备地址（应该抛出ValueError）"""
+        with pytest.raises(ValueError, match="Address must be between"):
+            flexconnect_hub.set_device_address(0x10000)  # 超出范围
+        
+        with pytest.raises(ValueError, match="Address must be between"):
+            flexconnect_hub.set_device_address(-1)  # 负数

@@ -15,6 +15,38 @@ def pytest_configure(config):
         # 如果使用-s参数，capture已经是'no'
         pass
 
+
+# 在报告生成后修改HTML标题
+def pytest_sessionfinish(session, exitstatus):
+    """测试会话结束后，修改HTML报告的标题"""
+    try:
+        import pytest_html
+        # 获取HTML报告路径
+        html_path = getattr(session.config.option, 'htmlpath', None)
+        if html_path and os.path.exists(html_path):
+            product = os.environ.get('TEST_PRODUCT', '')
+            test_type = os.environ.get('TEST_TYPE', '')
+            if product and test_type:
+                title = f"{product} - {test_type}"
+                # 读取HTML文件
+                with open(html_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # 替换标题（替换 <title> 标签和页面中的标题）
+                import re
+                # 替换 <title> 标签
+                content = re.sub(r'<title>.*?</title>', f'<title>{title}</title>', content, flags=re.DOTALL)
+                # 替换页面中的标题（通常在 h1 或 header 中）
+                # pytest-html 的标题通常在 class="title" 的 div 中
+                content = re.sub(r'(<div[^>]*class="title"[^>]*>)(.*?)(</div>)', 
+                                f'\\1{title}\\3', content, flags=re.DOTALL)
+                
+                # 写回文件
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+    except Exception:
+        pass  # 如果修改失败，不影响测试结果
+
 # 配置日志格式（避免使用方括号，pytest会误认为是参数化语法）
 logging.basicConfig(
     level=logging.INFO,

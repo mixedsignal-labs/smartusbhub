@@ -1,10 +1,11 @@
 ﻿#!/usr/bin/env python3
 """
-Multi-device control demo
+Multi-device channel control demo
 
 Scan and connect all available SmartUSBHub devices, control all channels uniformly.
-Demo effect: sequential channel activation - each channel has an indicator light, 
-creating a visual sequence as channels are turned on one by one.
+This demo demonstrates multi-device port control - sequentially activating channels 
+across multiple devices. The visual "chasing light" effect is a side effect of 
+indicator lights on each channel, not the main purpose of this demo.
 
 Press Ctrl+C to exit.
 """
@@ -126,10 +127,11 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     print("=" * 60)
-    print("Multi-device control demo / 多设备控制演示")
+    print("Multi-device channel control demo / 多设备通道控制演示")
     print("=" * 60)
     print("Scan and connect all SmartUSBHub devices, control all channels uniformly / 扫描并连接所有SmartUSBHub设备，统一控制所有通道")
-    print("Demo effect: sequential channel activation - each channel has an indicator light / 演示效果：顺序通道激活 - 每个通道有指示灯，按顺序依次打开通道")
+    print("This demo demonstrates multi-device port control / 本演示展示多设备端口控制功能")
+    print("Note: The visual effect is due to indicator lights on each channel / 注意：视觉效果是因为每个通道有指示灯")
     print("Press Ctrl+C to exit / 按 Ctrl+C 退出程序")
     print("=" * 60)
     print()

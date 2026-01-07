@@ -2237,18 +2237,6 @@ class SmartUSBHub:
             bool: True if command was acknowledged, False otherwise.
 
         set_channel_slow_charge(channels)
-        ↓
-        获取当前电源状态
-        ↓
-        ┌─────────────────┬─────────────────┐
-        │  关闭状态         │   已打开状态     │
-        │  (power=0)      │  (power=1)      │
-        ├─────────────────┼─────────────────┤
-        │ 1. 打开电源       │ 1. 如果disconnect│
-        │ 2. 设置为快充     │    =True，断开3秒│
-        │ 3. 等待3秒       │                 │
-        │ 4. 切换到慢充     │ 2. 切换到慢充   │
-        └─────────────────┴─────────────────┘
 
         """
         channels_list = list(channels)
@@ -2392,35 +2380,82 @@ class SmartUSBHub:
             return False
 
     @synchronized
-    def get_channel_charge_mode(self, *channels):
+    def get_channel_charge_mode(self, *channels, wait_for_stable=True, max_retries=3, retry_delay=0.15):
         """
         Requests the charge mode for specified channels.
 
         Args:
             *channels (int): Channels to query.
+            wait_for_stable (bool): If True, wait for hardware to complete switching before querying.
+                                   Default is True. When switching charge modes, each channel needs
+                                   about 100ms+ to complete, so this ensures accurate results.
+            max_retries (int): Maximum number of retries if wait_for_stable is True and state is inconsistent.
+                              Default is 3.
+            retry_delay (float): Delay in seconds between retries. Default is 0.15 (150ms per channel).
 
         Returns:
             dict or None: A dictionary with channel numbers as keys and charge modes as values.
                           Charge mode values: 0=off, 1=fast_charge, 2=slow_charge.
                           Returns None if timed out.
         """
+
+        if wait_for_stable:
+            if len(channels) == 1:
+                base_wait = 0.15  # 单个通道150ms
+            else:
+                base_wait = 0.15 + (len(channels) - 1) * 0.05  # 每增加一个通道增加50ms
+            base_wait = min(max(0.1, base_wait), 0.5)  # 限制在100ms-500ms之间
+            logger.debug(f"Waiting {base_wait:.3f}s for charge mode switching to complete on {len(channels)} channel(s)")
+            time.sleep(base_wait)
+        
         # 先清除事件，避免之前残留的ACK影响
         ack_event = self.ack_events[CMD_GET_CHANNEL_CHARGE_MODE]
-        ack_event.clear()
-        # 发送命令
-        self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
-        # 等待ACK
-        if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_charge_mode ACK")
-            result = {}
-            for ch in channels:
-                mode = self.channel_charge_modes.get(ch)
-                if mode is not None:
-                    result[ch] = mode
-            return result if result else None
-        else:
-            logger.error("get_channel_charge_mode No ACK!")
-            return None
+        
+        last_result = None
+        for attempt in range(max_retries if wait_for_stable else 1):
+            ack_event.clear()
+            # 发送命令
+            self._send_packet(CMD_GET_CHANNEL_CHARGE_MODE, channels)
+            # 等待ACK
+            if ack_event.wait(self.com_timeout):
+                logger.debug(f"get_channel_charge_mode ACK (attempt {attempt + 1}/{max_retries if wait_for_stable else 1})")
+                result = {}
+                for ch in channels:
+                    mode = self.channel_charge_modes.get(ch)
+                    if mode is not None:
+                        result[ch] = mode
+                
+                # 检查是否获取到了所有通道的状态
+                if result and len(result) == len(channels):
+                    # 如果启用了等待稳定状态，检查所有通道的值是否一致
+                    # 如果值不一致（说明有些通道还在切换中），需要重试
+                    if wait_for_stable and len(set(result.values())) > 1:
+                        # 值不一致，可能还在切换中，重试
+                        if attempt < max_retries - 1:
+                            last_result = result
+                            logger.debug(f"Charge mode values inconsistent across channels {result}, retrying after {retry_delay}s...")
+                            time.sleep(retry_delay)
+                            continue
+                    
+                    # 值一致或最后一次尝试，返回结果
+                    return result
+                
+                # 如果启用了等待稳定状态但结果不完整，记录并重试
+                if wait_for_stable and attempt < max_retries - 1:
+                    last_result = result
+                    logger.debug(f"Charge mode query incomplete (got {len(result) if result else 0}/{len(channels)} channels), retrying after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    # 最后一次尝试或未启用等待，返回当前结果
+                    return result if result else None
+            else:
+                logger.error(f"get_channel_charge_mode No ACK! (attempt {attempt + 1}/{max_retries if wait_for_stable else 1})")
+                if wait_for_stable and attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    return last_result if last_result else None
+        
+        return last_result if last_result else None
 
     @synchronized
     def set_button_control(self, enable: bool):
@@ -2965,6 +3000,7 @@ class SmartUSBHub:
                 - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
                 - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
                 - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                - FLEXCONNECT_MODE_DISCONNECT (0x03): Disconnect all connections mode
                 
         Returns:
             bool: True if command was acknowledged, False otherwise.
@@ -2979,11 +3015,12 @@ class SmartUSBHub:
             raise ValueError(f"Product {product_name} is not a FlexConnect product. "
                            f"This method is only available for FlexConnect devices.")
         
-        # Validate mode (only PC, UDISK1, UDISK2 are valid for default mode, not DISCONNECT)
-        if mode not in [FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2]:
+        # Validate mode (including DISCONNECT mode)
+        if mode not in [FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2, FLEXCONNECT_MODE_DISCONNECT]:
             raise ValueError(f"Invalid FlexConnect default mode: {mode}. "
                            f"Valid modes are: FLEXCONNECT_MODE_PC (0), "
-                           f"FLEXCONNECT_MODE_UDISK1 (1), FLEXCONNECT_MODE_UDISK2 (2)")
+                           f"FLEXCONNECT_MODE_UDISK1 (1), FLEXCONNECT_MODE_UDISK2 (2), "
+                           f"FLEXCONNECT_MODE_DISCONNECT (3)")
         
         # Send command
         self._send_packet(CMD_SET_FLEXCONNECT_DEFAULT_MODE, None, mode)
@@ -3004,6 +3041,7 @@ class SmartUSBHub:
                 - FLEXCONNECT_MODE_PC (0x00): PC mode (ADB debugging)
                 - FLEXCONNECT_MODE_UDISK1 (0x01): U disk 1 mode
                 - FLEXCONNECT_MODE_UDISK2 (0x02): U disk 2 mode
+                - FLEXCONNECT_MODE_DISCONNECT (0x03): Disconnect all connections mode
                 
         Raises:
             ValueError: If the product is not a FlexConnect product.

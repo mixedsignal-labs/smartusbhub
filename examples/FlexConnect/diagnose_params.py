@@ -14,7 +14,7 @@ project_root = os.path.dirname(os.path.dirname(script_dir))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2
+from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2, FLEXCONNECT_MODE_DISCONNECT
 
 
 def main():
@@ -38,7 +38,12 @@ def main():
         # 当前模式
         current_mode = hub.get_flexconnect_mode()
         print(f"\n1. 当前 FlexConnect 模式 / Current FlexConnect mode: {current_mode}")
-        mode_names = {0: "PC", 1: "UDISK1", 2: "UDISK2", 3: "DISCONNECT"}
+        mode_names = {
+            FLEXCONNECT_MODE_PC: "PC",
+            FLEXCONNECT_MODE_UDISK1: "UDISK1",
+            FLEXCONNECT_MODE_UDISK2: "UDISK2",
+            FLEXCONNECT_MODE_DISCONNECT: "DISCONNECT"
+        }
         print(f"   ({mode_names.get(current_mode, '未知')})")
         
         # 默认模式
@@ -47,6 +52,7 @@ def main():
         print(f"   ({mode_names.get(default_mode, '未知')})")
         print(f"   [NOTE] 断电重启时，如果没有其他优先级更高的设置，将使用此模式 /")
         print(f"          On power cycle, this mode is used if no higher-priority setting is present.")
+        print(f"          Supported modes: PC(0), UDISK1(1), UDISK2(2), DISCONNECT(3)")
         
         # 掉电恢复状态
         auto_restore = hub.get_auto_restore_status()
@@ -103,8 +109,6 @@ def main():
             print(f"\n由于掉电恢复已禁用，断电重启时 / Since power-off recovery is disabled, on power cycle:")
             print(f"  → 将直接使用默认模式: {mode_names.get(default_mode, '未知')} /")
             print(f"    Device will directly use the default mode.")
-            print(f"  → 如果实际恢复到其他模式，说明实际行为与当前配置不一致，请检查固件实现和参数设置 /")
-            print(f"    If the restored mode is different, the behavior is inconsistent with current settings; please review firmware implementation and parameters.")
         
         print("\n" + "=" * 60)
         

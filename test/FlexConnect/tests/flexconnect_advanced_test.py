@@ -15,13 +15,13 @@ import sys
 import os
 import time
 
-# 添加项目根目录到路径（从test/FlexConnect/到项目根目录）
+# 添加项目根目录到路径（从test/FlexConnect/tests/到项目根目录）
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(script_dir))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2
+from smartusbhub import SmartUSBHub, FLEXCONNECT_MODE_PC, FLEXCONNECT_MODE_UDISK1, FLEXCONNECT_MODE_UDISK2, FLEXCONNECT_MODE_DISCONNECT
 
 
 def print_mode_name(mode):
@@ -29,7 +29,8 @@ def print_mode_name(mode):
     mode_names = {
         FLEXCONNECT_MODE_PC: "PC模式",
         FLEXCONNECT_MODE_UDISK1: "UDISK1模式",
-        FLEXCONNECT_MODE_UDISK2: "UDISK2模式"
+        FLEXCONNECT_MODE_UDISK2: "UDISK2模式",
+        FLEXCONNECT_MODE_DISCONNECT: "全部断开模式"
     }
     return mode_names.get(mode, f"Unknown({mode})")
 
@@ -80,8 +81,28 @@ def test_default_mode(hub):
         print(f"  ✗ 默认模式错误: 期望 {FLEXCONNECT_MODE_UDISK2}, 实际 {default_mode}")
         return False
     
+    # 测试设置默认模式为DISCONNECT
+    print("\n[步骤5] 设置上电默认模式为 全部断开（DISCONNECT）...")
+    result = hub.set_flexconnect_default_mode(FLEXCONNECT_MODE_DISCONNECT)
+    if result:
+        print("  ✓ 设置成功")
+    else:
+        print("  ✗ 设置失败")
+        return False
+    
+    time.sleep(0.2)
+    
+    # 验证默认模式
+    print("[步骤6] 读取上电默认模式...")
+    default_mode = hub.get_flexconnect_default_mode()
+    if default_mode == FLEXCONNECT_MODE_DISCONNECT:
+        print(f"  ✓ 默认模式正确: {print_mode_name(default_mode)}")
+    else:
+        print(f"  ✗ 默认模式错误: 期望 {FLEXCONNECT_MODE_DISCONNECT}, 实际 {default_mode}")
+        return False
+    
     # 恢复为PC模式（默认值）
-    print("\n[步骤5] 恢复默认模式为 PC（出厂默认）...")
+    print("\n[步骤7] 恢复默认模式为 PC（出厂默认）...")
     result = hub.set_flexconnect_default_mode(FLEXCONNECT_MODE_PC)
     if result:
         print("  ✓ 设置成功")

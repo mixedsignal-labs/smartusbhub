@@ -27,18 +27,28 @@ if __name__ == '__main__':
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
     args, pytest_args = parser.parse_known_args()
     
+    # 设置产品信息和测试类型到环境变量（供 conftest.py 使用）
+    os.environ['TEST_PRODUCT'] = 'FlexConnect'
+    if args.type == "integration":
+        os.environ['TEST_TYPE'] = '接口测试'
+    elif args.type == "stress":
+        os.environ['TEST_TYPE'] = '压力测试'
+    else:  # all
+        os.environ['TEST_TYPE'] = '全部测试'
+    
     # 确定测试文件
     test_dir = os.path.dirname(os.path.abspath(__file__))
+    tests_dir = os.path.join(test_dir, "tests")
     if args.type == "integration":
-        test_files = [os.path.join(test_dir, "test_integration.py")]
+        test_files = [os.path.join(tests_dir, "test_integration.py")]
         report_name = "report_integration.html"
     elif args.type == "stress":
-        test_files = [os.path.join(test_dir, "test_stress.py")]
+        test_files = [os.path.join(tests_dir, "test_stress.py")]
         report_name = "report_stress.html"
     else:  # all
         test_files = [
-            os.path.join(test_dir, "test_integration.py"),
-            os.path.join(test_dir, "test_stress.py")
+            os.path.join(tests_dir, "test_integration.py"),
+            os.path.join(tests_dir, "test_stress.py")
         ]
         report_name = "report_all.html"
     

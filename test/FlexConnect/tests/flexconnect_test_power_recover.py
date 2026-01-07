@@ -2,9 +2,9 @@
 import os
 import time
 
-# 添加项目根目录到路径（从test/FlexConnect/到项目根目录）
+# 添加项目根目录到路径（从test/FlexConnect/tests/到项目根目录）
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(script_dir))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 

@@ -4,8 +4,9 @@ Demo 01: FlexConnect 基础使用示例
 演示内容：
 1. 连接设备
 2. 获取设备信息
-3. 切换模式
-4. 查询当前模式
+3. 获取当前状态（模式、掉电恢复、按键控制、设备地址）
+4. 切换模式
+5. 设备地址设置和获取
 
 适用场景：
 - 快速入门
@@ -79,7 +80,48 @@ def main():
         button_status = hub.get_button_control_status()
         print(f"  按键控制: {'已启用' if button_status == 1 else '已禁用'}")
         
-        # ========== 步骤4: 模式切换演示 ==========
+        device_address = hub.get_device_address()
+        print(f"  设备地址: 0x{device_address:04X}")
+        
+        # ========== 步骤4: 设备地址演示 ==========
+        print("\n[步骤4] 设备地址演示...")
+        
+        # 获取原始地址
+        original_address = hub.get_device_address()
+        print(f"  当前设备地址: 0x{original_address:04X}")
+        
+        # 设置新地址
+        new_address = 0x0001
+        print(f"  设置设备地址为 0x{new_address:04X}...")
+        result = hub.set_device_address(new_address)
+        if result:
+            print("  ✓ 设置成功")
+            time.sleep(0.2)
+            
+            # 验证地址
+            address = hub.get_device_address()
+            if address == new_address:
+                print(f"  ✓ 验证成功: 当前设备地址为 0x{address:04X}")
+            else:
+                print(f"  ✗ 验证失败: 期望 0x{new_address:04X}, 实际 0x{address:04X}")
+            
+            # 恢复原始地址
+            print(f"\n  恢复原始设备地址 0x{original_address:04X}...")
+            result = hub.set_device_address(original_address)
+            if result:
+                print("  ✓ 恢复成功")
+                time.sleep(0.2)
+                address = hub.get_device_address()
+                if address == original_address:
+                    print(f"  ✓ 验证成功: 设备地址已恢复为 0x{address:04X}")
+                else:
+                    print(f"  ✗ 验证失败: 期望 0x{original_address:04X}, 实际 0x{address:04X}")
+            else:
+                print("  ✗ 恢复失败")
+        else:
+            print("  ✗ 设置失败")
+        
+        # ========== 步骤5: 模式切换演示 ==========
         print("\n[步骤4] 模式切换演示...")
         
         # 切换到 PC 模式
@@ -130,6 +172,8 @@ def main():
         print("\n提示:")
         print("  - 使用 set_flexconnect_mode() 切换模式")
         print("  - 使用 get_flexconnect_mode() 查询当前模式")
+        print("  - 使用 set_device_address() 设置设备地址（用于多设备场景）")
+        print("  - 使用 get_device_address() 获取设备地址")
         print("  - 切换模式后建议等待 0.3~1 秒让设备稳定")
         
     except Exception as e:

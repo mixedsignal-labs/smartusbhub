@@ -2388,6 +2388,7 @@ The device can control the connectivity of the D+ and D− differential pair for
 > - The device address is used to identify and distinguish each hub when multiple hubs are connected.
 > - The address is user-defined and must be in the range: `0x0000 - 0xFFFF`.
 > - The default address is `0x0000`.
+> - **Supported Products**: All products (including SmartUSBHub Pro and FlexConnect) support the device address feature.
 >
 > **Usage:**
 >
