@@ -2,7 +2,7 @@
 
 本目录包含 FlexConnect 产品的所有测试文件。
 
-## 📁 文件结构
+## 文件结构
 
 ```
 FlexConnect/
@@ -27,7 +27,7 @@ FlexConnect/
     └── report_stress.html           # 压力测试报告
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 接口测试（推荐首次运行）
 
@@ -44,7 +44,11 @@ python test/FlexConnect/run_tests.py --type integration
 测试设备在高频操作下的稳定性（模式切换、故障检测）。
 
 ```bash
+# 使用默认测试次数（10,000 次）
 python test/FlexConnect/run_tests.py --type stress
+
+# 指定测试次数
+python test/FlexConnect/run_tests.py --type stress --count 5000
 ```
 
 **预计时间**: 10-30 分钟（取决于测试次数配置）
@@ -55,18 +59,18 @@ python test/FlexConnect/run_tests.py --type stress
 python test/FlexConnect/run_tests.py --all
 ```
 
-## 📊 测试类型说明
+## 测试类型说明
 
 ### test_integration.py - 接口测试
 
 **目的**: 验证所有 API 接口的基本功能
 
 **测试内容**:
-- ✅ 设备连接和基本信息
-- ✅ FlexConnect 模式设置（PC、UDISK1、UDISK2、断开）
-- ✅ 模式状态读取
-- ✅ 故障检测
-- ✅ 错误处理
+- 设备连接和基本信息
+- FlexConnect 模式设置（PC、UDISK1、UDISK2、断开）
+- 模式状态读取
+- 故障检测
+- 错误处理
 
 **成功标准**: 所有测试通过
 
@@ -75,9 +79,9 @@ python test/FlexConnect/run_tests.py --all
 **目的**: 通过大量重复操作验证设备稳定性
 
 **测试内容**:
-- 🔄 模式切换循环测试
-- 🔄 故障检测
-- 🔄 状态读取
+- 模式切换循环测试
+- 故障检测
+- 状态读取
 
 **默认测试次数**: 10,000 次循环
 
@@ -95,7 +99,7 @@ python test/FlexConnect/run_tests.py --all
 
 这些测试文件可以直接运行，或通过 `flexconnect_test_scenarios.py` 统一入口运行。
 
-## 🛠️ 运行脚本使用说明
+## 运行脚本使用说明
 
 ### run_tests.py - 统一测试运行脚本
 
@@ -108,6 +112,9 @@ python test/FlexConnect/run_tests.py --type integration
 # 运行压力测试
 python test/FlexConnect/run_tests.py --type stress
 
+# 运行压力测试，指定测试次数
+python test/FlexConnect/run_tests.py --type stress --count 5000
+
 # 运行所有测试
 python test/FlexConnect/run_tests.py --all
 
@@ -117,6 +124,38 @@ python test/FlexConnect/run_tests.py --all --no-open
 # 不生成 HTML 报告
 python test/FlexConnect/run_tests.py --all --no-html
 ```
+
+### 命令行参数说明
+
+#### --type
+
+指定测试类型：
+- `integration`: 接口测试
+- `stress`: 压力测试
+- `all`: 运行所有测试
+
+#### --count
+
+指定压力测试的测试次数。适用于 `stress` 类型。
+
+默认测试次数为 10,000 次。
+
+示例：
+```bash
+# 压力测试，指定 5,000 次
+python test/FlexConnect/run_tests.py --type stress --count 5000
+
+# 压力测试，指定 20,000 次
+python test/FlexConnect/run_tests.py --type stress --count 20000
+```
+
+#### --no-open
+
+不自动打开 HTML 报告。
+
+#### --no-html
+
+不生成 HTML 报告。
 
 ### 运行场景测试
 
@@ -128,7 +167,7 @@ python test/FlexConnect/tests/flexconnect_test_scenarios.py
 python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 ```
 
-## 📈 测试报告
+## 测试报告
 
 ### 控制台输出
 
@@ -144,13 +183,33 @@ python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 
 报告会在测试完成后自动在浏览器中打开。
 
-## ⚙️ 自定义测试配置
+## 自定义测试配置
 
 ### 修改压力测试次数
 
+#### 方法 1: 使用命令行参数（推荐）
+
+```bash
+python test/FlexConnect/run_tests.py --type stress --count 5000
+```
+
+#### 方法 2: 使用环境变量
+
+```bash
+# Windows PowerShell
+$env:STRESS_TEST_COUNT=5000
+python test/FlexConnect/run_tests.py --type stress
+
+# Linux/macOS
+export STRESS_TEST_COUNT=5000
+python test/FlexConnect/run_tests.py --type stress
+```
+
+#### 方法 3: 修改代码
+
 编辑 `tests/test_stress.py`，修改 `STRESS_TEST_TOTAL_COUNT` 变量（默认 10,000）。
 
-## ⚠️ 注意事项
+## 注意事项
 
 ### 运行前准备
 
@@ -161,7 +220,7 @@ python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 
 ### 运行时
 
-1. **测试时间**: 压力测试需要较长时间（约 10-30 分钟）
+1. **测试时间**: 压力测试需要较长时间（约 10-30 分钟，取决于测试次数）
 2. **设备占用**: 测试过程中设备将被持续占用
 3. **中断测试**: 可以使用 Ctrl+C 安全中断测试
 4. **USB 线缆**: 建议使用质量好的 USB 线缆
@@ -174,13 +233,14 @@ python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 3. 生成 HTML 报告（如果安装了 pytest-html）
 4. 自动打开报告（可以使用 --no-open 禁用）
 
-## 🔍 故障排查
+## 故障排查
 
 ### 问题 1: 找不到设备
 
 **症状**: 测试跳过，提示 "未找到设备"
 
 **解决方案**:
+
 1. 检查设备连接
 2. 检查驱动安装
 3. 重新插拔 USB
@@ -191,6 +251,7 @@ python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 **症状**: 成功率低于 95%
 
 **解决方案**:
+
 1. 更换 USB 线缆
 2. 更换 USB 端口
 3. 关闭其他占用系统资源的程序
@@ -201,27 +262,18 @@ python test/FlexConnect/tests/scenarios/test_scenario_2_3.py
 **症状**: 提示无法生成 HTML 报告
 
 **解决方案**:
+
 ```bash
 pip install pytest-html
 ```
 
-## 📊 成功率标准
+## 成功率标准
 
 - **成功率阈值**: 95%
 - **低于 95%**: 测试失败（assert 错误）
 - **95% - 99%**: 通过但需关注
 - **≥99%**: 优秀
 
-## 📚 相关资源
-
-- **上级目录**: [../README.md](../README.md) - 测试套件总体说明
-- **测试框架配置**: [../conftest.py](../conftest.py) - pytest fixtures 配置
-- **示例程序**: [../../examples/FlexConnect/](../../examples/FlexConnect/) - 示例程序目录
-- **硬件测试指南**: [HARDWARE_TEST_GUIDE.md](./HARDWARE_TEST_GUIDE.md) - 硬件测试指南（如果存在）
-- **测试概览**: [TESTING_OVERVIEW.md](./TESTING_OVERVIEW.md) - 测试概览（如果存在）
-- **验证指南**: [VALIDATION_GUIDE.md](./VALIDATION_GUIDE.md) - 验证指南（如果存在）
-
 ---
 
 **最后更新**: 2026-01-07
-

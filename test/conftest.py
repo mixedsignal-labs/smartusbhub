@@ -34,18 +34,40 @@ def pytest_sessionfinish(session, exitstatus):
                 
                 # 替换标题（替换 <title> 标签和页面中的标题）
                 import re
-                # 替换 <title> 标签
+                # 1. 替换 <title> 标签
                 content = re.sub(r'<title>.*?</title>', f'<title>{title}</title>', content, flags=re.DOTALL)
-                # 替换页面中的标题（通常在 h1 或 header 中）
-                # pytest-html 的标题通常在 class="title" 的 div 中
-                content = re.sub(r'(<div[^>]*class="title"[^>]*>)(.*?)(</div>)', 
+                
+                # 2. 替换页面中的标题（pytest-html 的标题可能在多个位置）
+                # 2.1 class="title" 的 div（最常见）
+                content = re.sub(r'(<div[^>]*class=["\']title["\'][^>]*>)(.*?)(</div>)', 
+                                f'\\1{title}\\3', content, flags=re.DOTALL | re.IGNORECASE)
+                
+                # 2.2 h1 标签中的标题
+                content = re.sub(r'(<h1[^>]*>)(.*?)(</h1>)', 
                                 f'\\1{title}\\3', content, flags=re.DOTALL)
+                
+                # 2.3 替换可能包含文件名的标题（如 "report_stress.html"）
+                # 匹配各种可能的标题格式
+                patterns = [
+                    r'report_\w+\.html',  # report_stress.html
+                    r'Test Report',       # Test Report
+                    r'Pytest Report',     # Pytest Report
+                ]
+                for pattern in patterns:
+                    content = re.sub(pattern, title, content, flags=re.IGNORECASE)
+                
+                # 2.4 替换可能出现在 body 开头的标题文本
+                # 查找并替换页面主体中第一个明显的标题文本
+                content = re.sub(r'(<body[^>]*>.*?<div[^>]*>)(report_\w+\.html|Test Report|Pytest Report)(</div>)',
+                                f'\\1{title}\\3', content, flags=re.DOTALL | re.IGNORECASE)
                 
                 # 写回文件
                 with open(html_path, 'w', encoding='utf-8') as f:
                     f.write(content)
-    except Exception:
-        pass  # 如果修改失败，不影响测试结果
+    except Exception as e:
+        # 记录错误但不影响测试结果
+        import logging
+        logging.getLogger(__name__).debug(f"无法修改HTML报告标题: {e}")
 
 # 配置日志格式（避免使用方括号，pytest会误认为是参数化语法）
 logging.basicConfig(

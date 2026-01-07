@@ -2,7 +2,7 @@
 
 本目录包含 SmartUSBHub Python 库的测试，按产品组织，直接连接真实设备进行测试。
 
-## 📁 目录结构
+## 目录结构
 
 ```
 test/
@@ -27,7 +27,7 @@ test/
 └── README.md                 # 本文件
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ### 基本要求
 
@@ -58,10 +58,13 @@ python test/SmartUSBHub_Pro/run_tests.py --type integration
 # 运行压力测试
 python test/SmartUSBHub_Pro/run_tests.py --type stress
 
+# 运行压力测试，指定测试次数
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
+
 # 运行充电模式切换压力测试
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 
-# 指定测试次数
+# 运行充电模式切换压力测试，指定测试次数
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 1000
 
 # 不自动打开报告
@@ -80,11 +83,14 @@ python test/FlexConnect/run_tests.py --type integration
 # 运行压力测试
 python test/FlexConnect/run_tests.py --type stress
 
+# 运行压力测试，指定测试次数
+python test/FlexConnect/run_tests.py --type stress --count 5000
+
 # 不自动打开报告
 python test/FlexConnect/run_tests.py --all --no-open
 ```
 
-## 📊 测试类型说明
+## 测试类型说明
 
 ### 接口测试 (integration)
 
@@ -99,8 +105,44 @@ python test/FlexConnect/run_tests.py --all --no-open
 - **内容**: 高频操作测试、状态读取、模式切换等
 - **预计时间**: 5-30 分钟（取决于测试次数）
 - **成功标准**: 成功率 ≥95%
+- **自定义测试次数**: 使用 `--count` 参数指定测试次数
 
-## 📈 测试报告
+## 命令行参数说明
+
+### --type
+
+指定测试类型：
+- `integration`: 接口测试
+- `stress`: 压力测试
+- `stress_charge_mode`: 充电模式切换压力测试（仅 SmartUSBHub Pro）
+- `all`: 运行所有测试
+
+### --count
+
+指定压力测试的测试次数。适用于所有压力测试类型（`stress` 和 `stress_charge_mode`）。
+
+- SmartUSBHub Pro 核心功能压力测试默认 500,000 次
+- SmartUSBHub Pro 充电模式切换压力测试默认 10,000 次
+- FlexConnect 压力测试默认 10,000 次
+
+示例：
+```bash
+# SmartUSBHub Pro 核心功能压力测试，指定 10,000 次
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
+
+# FlexConnect 压力测试，指定 5,000 次
+python test/FlexConnect/run_tests.py --type stress --count 5000
+```
+
+### --no-open
+
+不自动打开 HTML 报告。
+
+### --no-html
+
+不生成 HTML 报告。
+
+## 测试报告
 
 测试运行脚本会自动生成 HTML 报告，保存在各产品目录的 `report/` 子目录中。
 
@@ -110,7 +152,7 @@ python test/FlexConnect/run_tests.py --all --no-open
 python test/SmartUSBHub_Pro/run_tests.py --all --no-open
 ```
 
-## ⚠️ 注意事项
+## 注意事项
 
 ### 运行前准备
 
@@ -135,13 +177,13 @@ python test/SmartUSBHub_Pro/run_tests.py --all --no-open
 4. 生成 HTML 报告（如果安装了 pytest-html）
 5. 自动打开报告（可以使用 --no-open 禁用）
 
-## 📚 详细文档
+## 详细文档
 
 - **[SmartUSBHub_Pro/README.md](./SmartUSBHub_Pro/README.md)** - SmartUSBHub Pro 测试详细文档
 - **[FlexConnect/README.md](./FlexConnect/README.md)** - FlexConnect 测试详细文档
 - **[TEST_FILES_GUIDE.md](./TEST_FILES_GUIDE.md)** - 测试文件详细使用指南
 
-## 🔍 故障排查
+## 故障排查
 
 ### 问题 1: 找不到设备
 
@@ -172,7 +214,7 @@ python test/SmartUSBHub_Pro/run_tests.py --all --no-open
 pip install pytest-html
 ```
 
-## 📝 设计说明
+## 设计说明
 
 ### 文件组织原则
 

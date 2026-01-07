@@ -38,7 +38,8 @@ from smartusbhub import SmartUSBHub
 logger = logging.getLogger(__name__)
 
 # ==================== 测试次数配置 ====================
-STRESS_TEST_TOTAL_COUNT = 500000
+# 可以通过环境变量 STRESS_TEST_COUNT 来覆盖默认值
+STRESS_TEST_TOTAL_COUNT = int(os.environ.get('STRESS_TEST_COUNT', 500000))  # 默认测试50万次
 
 
 def format_time(seconds):
@@ -95,6 +96,7 @@ def generate_stats_html(stats, op_names, supports_usb2, supports_usb3,
                        success_rate, elapsed_time, ops_per_sec,
                        hardware_version=None, firmware_version=None, serial_no=None):
     """生成用于HTML报告的统计信息表格"""
+    import os
     html = '<div style="margin: 20px 0;">'
     html += '<h3>压力测试详细统计</h3>'
     
@@ -103,6 +105,10 @@ def generate_stats_html(stats, op_names, supports_usb2, supports_usb3,
     html += '<h4>设备信息</h4>'
     html += '<table style="border-collapse: collapse; width: 100%; margin-bottom: 20px;">'
     html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px; text-align: left;">项目</th><th style="border: 1px solid #ddd; padding: 8px; text-align: left;">数值</th></tr>'
+    
+    # 产品名称
+    product_name = os.environ.get('TEST_PRODUCT', 'SmartUSBHub Pro')
+    html += f'<tr><td style="border: 1px solid #ddd; padding: 8px;">产品名称</td><td style="border: 1px solid #ddd; padding: 8px;">{product_name}</td></tr>'
     
     hw_version_str = f"V1.{hardware_version}" if hardware_version is not None else "未知"
     html += f'<tr><td style="border: 1px solid #ddd; padding: 8px;">硬件版本</td><td style="border: 1px solid #ddd; padding: 8px;">{hw_version_str}</td></tr>'

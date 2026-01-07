@@ -6,7 +6,8 @@ SmartUSBHub Pro 测试运行脚本
     python SmartUSBHub_Pro/run_tests.py --type integration          # 运行接口测试
     python SmartUSBHub_Pro/run_tests.py --type stress               # 运行核心功能压力测试
     python SmartUSBHub_Pro/run_tests.py --type stress_charge_mode   # 运行充电模式切换压力测试
-    python SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 1000  # 指定测试次数
+    python SmartUSBHub_Pro/run_tests.py --type stress --count 10000  # 指定核心功能压力测试次数
+    python SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 1000  # 指定充电模式切换测试次数
     python SmartUSBHub_Pro/run_tests.py --all                      # 运行所有测试
     python SmartUSBHub_Pro/run_tests.py --no-open                  # 不自动打开报告
 """
@@ -29,10 +30,10 @@ if __name__ == '__main__':
                        help="测试类型: integration(接口测试), stress(核心功能压力测试), stress_charge_mode(充电模式切换压力测试), all(全部)")
     parser.add_argument("--no-open", action="store_true", help="不自动打开HTML报告")
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
-    parser.add_argument("--count", type=int, help="压力测试次数（仅用于 stress_charge_mode）")
+    parser.add_argument("--count", type=int, help="压力测试次数（用于 stress 和 stress_charge_mode）")
     args, pytest_args = parser.parse_known_args()
     
-    # 如果指定了测试次数，通过环境变量传递
+    # 如果指定了测试次数，通过环境变量传递（所有压力测试类型都支持）
     if args.count:
         os.environ['STRESS_TEST_COUNT'] = str(args.count)
     

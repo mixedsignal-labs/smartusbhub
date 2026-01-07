@@ -5,6 +5,7 @@ FlexConnect 测试运行脚本
 使用方法:
     python FlexConnect/run_tests.py --type integration    # 运行接口测试
     python FlexConnect/run_tests.py --type stress         # 运行压力测试
+    python FlexConnect/run_tests.py --type stress --count 5000  # 指定压力测试次数
     python FlexConnect/run_tests.py --all                # 运行所有测试
     python FlexConnect/run_tests.py --no-open            # 不自动打开报告
 """
@@ -25,7 +26,12 @@ if __name__ == '__main__':
                        help="测试类型: integration(接口测试), stress(压力测试), all(全部)")
     parser.add_argument("--no-open", action="store_true", help="不自动打开HTML报告")
     parser.add_argument("--no-html", action="store_true", help="不生成HTML报告")
+    parser.add_argument("--count", type=int, help="压力测试次数（用于 stress）")
     args, pytest_args = parser.parse_known_args()
+    
+    # 如果指定了测试次数，通过环境变量传递
+    if args.count:
+        os.environ['STRESS_TEST_COUNT'] = str(args.count)
     
     # 设置产品信息和测试类型到环境变量（供 conftest.py 使用）
     os.environ['TEST_PRODUCT'] = 'FlexConnect'
@@ -88,6 +94,8 @@ if __name__ == '__main__':
     
     print("\n" + "="*70)
     print(f"开始运行 FlexConnect 测试 ({args.type})...")
+    if args.count:
+        print(f"测试次数: {args.count}")
     print("="*70 + "\n")
     
     exit_code = pytest.main(test_args)

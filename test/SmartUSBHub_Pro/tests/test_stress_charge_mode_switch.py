@@ -109,6 +109,11 @@ def generate_stats_html(stats, mode_names, total_operations, success_count, fail
     html += '<table style="border-collapse: collapse; width: 100%; margin-bottom: 20px;">'
     html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px; text-align: left;">项目</th><th style="border: 1px solid #ddd; padding: 8px; text-align: left;">数值</th></tr>'
     
+    # 产品名称
+    import os
+    product_name = os.environ.get('TEST_PRODUCT', 'SmartUSBHub Pro')
+    html += f'<tr><td style="border: 1px solid #ddd; padding: 8px;">产品名称</td><td style="border: 1px solid #ddd; padding: 8px;">{product_name}</td></tr>'
+    
     hw_version_str = f"V1.{hardware_version}" if hardware_version is not None else "未知"
     html += f'<tr><td style="border: 1px solid #ddd; padding: 8px;">硬件版本</td><td style="border: 1px solid #ddd; padding: 8px;">{hw_version_str}</td></tr>'
     

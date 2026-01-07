@@ -2,7 +2,7 @@
 
 本目录包含 SmartUSBHub Pro 产品的所有测试文件。
 
-## 📁 文件结构
+## 文件结构
 
 ```
 SmartUSBHub_Pro/
@@ -18,7 +18,7 @@ SmartUSBHub_Pro/
     └── report_stress_charge_mode.html  # 充电模式切换压力测试报告
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 接口测试（推荐首次运行）
 
@@ -35,7 +35,11 @@ python test/SmartUSBHub_Pro/run_tests.py --type integration
 测试设备在高频操作下的稳定性（电源控制、数据线切换）。
 
 ```bash
+# 使用默认测试次数（500,000 次）
 python test/SmartUSBHub_Pro/run_tests.py --type stress
+
+# 指定测试次数
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
 ```
 
 **预计时间**: 5-30 分钟（取决于测试次数配置）
@@ -45,7 +49,7 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress
 测试设备在快充/慢充模式之间频繁切换的稳定性。
 
 ```bash
-# 基本用法
+# 使用默认测试次数（10,000 次）
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 
 # 指定测试次数
@@ -60,20 +64,20 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 1000
 python test/SmartUSBHub_Pro/run_tests.py --all
 ```
 
-## 📊 测试类型说明
+## 测试类型说明
 
 ### test_integration.py - 接口测试
 
 **目的**: 验证所有 API 接口的基本功能
 
 **测试内容**:
-- ✅ 设备连接和基本信息
-- ✅ 电源控制（单通道、多通道、组合控制、互锁模式）
-- ✅ 监控功能（电压、电流）
-- ✅ 数据线控制（连接/断开、状态读取）
-- ✅ 充电模式（慢充、快充）
-- ✅ 设备设置（工作模式、按钮控制、自动恢复）
-- ✅ 高级功能（电源序列、状态获取）
+- 设备连接和基本信息
+- 电源控制（单通道、多通道、组合控制、互锁模式）
+- 监控功能（电压、电流）
+- 数据线控制（连接/断开、状态读取）
+- 充电模式（慢充、快充）
+- 设备设置（工作模式、按钮控制、自动恢复）
+- 高级功能（电源序列、状态获取）
 
 **测试用例数**: 22 个
 
@@ -84,10 +88,10 @@ python test/SmartUSBHub_Pro/run_tests.py --all
 **目的**: 通过大量重复操作验证设备稳定性
 
 **测试内容**:
-- 🔄 多通道电源开关控制（循环测试）
-- 🔄 获取电源状态
-- 🔄 USB2/USB3 数据线连接/断开（如果设备支持）
-- 🔄 获取数据线状态
+- 多通道电源开关控制（循环测试）
+- 获取电源状态
+- USB2/USB3 数据线连接/断开（如果设备支持）
+- 获取数据线状态
 
 **默认测试次数**: 500,000 次操作
 
@@ -98,10 +102,10 @@ python test/SmartUSBHub_Pro/run_tests.py --all
 **目的**: 验证设备在长时间、高频率的充电模式切换下的稳定性
 
 **测试内容**:
-- 🔄 设置快充模式（fast_charge）
-- ✅ 验证快充模式状态
-- 🔄 设置慢充模式（slow_charge/ilim）
-- ✅ 验证慢充模式状态
+- 设置快充模式（fast_charge）
+- 验证快充模式状态
+- 设置慢充模式（slow_charge/ilim）
+- 验证慢充模式状态
 
 **默认测试次数**: 10,000 次切换
 
@@ -114,7 +118,7 @@ python test/SmartUSBHub_Pro/run_tests.py --all
 - 支持自定义测试次数
 - HTML 报告生成
 
-## 🛠️ 运行脚本使用说明
+## 运行脚本使用说明
 
 ### run_tests.py - 统一测试运行脚本
 
@@ -127,10 +131,13 @@ python test/SmartUSBHub_Pro/run_tests.py --type integration
 # 运行核心功能压力测试
 python test/SmartUSBHub_Pro/run_tests.py --type stress
 
+# 运行核心功能压力测试，指定测试次数
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
+
 # 运行充电模式切换压力测试
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 
-# 指定测试次数（仅用于 stress_charge_mode）
+# 运行充电模式切换压力测试，指定测试次数
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 1000
 
 # 运行所有测试
@@ -143,7 +150,41 @@ python test/SmartUSBHub_Pro/run_tests.py --all --no-open
 python test/SmartUSBHub_Pro/run_tests.py --all --no-html
 ```
 
-## 📈 测试报告
+### 命令行参数说明
+
+#### --type
+
+指定测试类型：
+- `integration`: 接口测试
+- `stress`: 核心功能压力测试
+- `stress_charge_mode`: 充电模式切换压力测试
+- `all`: 运行所有测试
+
+#### --count
+
+指定压力测试的测试次数。适用于 `stress` 和 `stress_charge_mode` 两种压力测试类型。
+
+- 核心功能压力测试默认 500,000 次
+- 充电模式切换压力测试默认 10,000 次
+
+示例：
+```bash
+# 核心功能压力测试，指定 10,000 次
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
+
+# 充电模式切换压力测试，指定 5,000 次
+python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 5000
+```
+
+#### --no-open
+
+不自动打开 HTML 报告。
+
+#### --no-html
+
+不生成 HTML 报告。
+
+## 测试报告
 
 ### 控制台输出
 
@@ -160,13 +201,17 @@ python test/SmartUSBHub_Pro/run_tests.py --all --no-html
 
 报告会在测试完成后自动在浏览器中打开。
 
-## ⚙️ 自定义测试配置
+## 自定义测试配置
 
-### 修改充电模式切换测试次数
+### 修改压力测试次数
 
 #### 方法 1: 使用命令行参数（推荐）
 
 ```bash
+# 核心功能压力测试
+python test/SmartUSBHub_Pro/run_tests.py --type stress --count 10000
+
+# 充电模式切换压力测试
 python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 5000
 ```
 
@@ -174,23 +219,21 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode --count 5000
 
 ```bash
 # Windows PowerShell
-$env:STRESS_TEST_COUNT=5000
-python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
+$env:STRESS_TEST_COUNT=10000
+python test/SmartUSBHub_Pro/run_tests.py --type stress
 
 # Linux/macOS
-export STRESS_TEST_COUNT=5000
-python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
+export STRESS_TEST_COUNT=10000
+python test/SmartUSBHub_Pro/run_tests.py --type stress
 ```
 
 #### 方法 3: 修改代码
 
-编辑 `tests/test_stress_charge_mode_switch.py`，修改 `STRESS_TEST_TOTAL_COUNT` 变量。
+编辑对应的测试文件，修改 `STRESS_TEST_TOTAL_COUNT` 变量：
+- `tests/test_stress.py`: 核心功能压力测试（默认 500,000）
+- `tests/test_stress_charge_mode_switch.py`: 充电模式切换压力测试（默认 10,000）
 
-### 修改核心功能压力测试次数
-
-编辑 `tests/test_stress.py`，修改 `STRESS_TEST_TOTAL_COUNT` 变量（默认 500,000）。
-
-## ⚠️ 注意事项
+## 注意事项
 
 ### 运行前准备
 
@@ -202,8 +245,8 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 ### 运行时
 
 1. **测试时间**: 压力测试需要较长时间
-   - 核心功能压力测试: 约 5-30 分钟
-   - 充电模式切换压力测试: 约 10-20 分钟
+   - 核心功能压力测试: 约 5-30 分钟（取决于测试次数）
+   - 充电模式切换压力测试: 约 10-20 分钟（默认 10,000 次）
 2. **设备占用**: 测试过程中设备将被持续占用
 3. **中断测试**: 可以使用 Ctrl+C 安全中断测试
 4. **USB 线缆**: 建议使用质量好的 USB 线缆
@@ -217,7 +260,7 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 4. 生成 HTML 报告（如果安装了 pytest-html）
 5. 自动打开报告（可以使用 --no-open 禁用）
 
-## 🔍 故障排查
+## 故障排查
 
 ### 问题 1: 找不到设备
 
@@ -248,18 +291,12 @@ python test/SmartUSBHub_Pro/run_tests.py --type stress_charge_mode
 pip install pytest-html
 ```
 
-## 📊 成功率标准
+## 成功率标准
 
 - **成功率阈值**: 95%
 - **低于 95%**: 测试失败（assert 错误）
 - **95% - 99%**: 通过但需关注
 - **≥99%**: 优秀
-
-## 📚 相关资源
-
-- **上级目录**: [../README.md](../README.md) - 测试套件总体说明
-- **测试框架配置**: [../conftest.py](../conftest.py) - pytest fixtures 配置
-- **示例程序**: [../../examples/SmartUSBHub_Pro/](../../examples/SmartUSBHub_Pro/) - 示例程序目录
 
 ---
 
