@@ -1,4 +1,6 @@
 .venv
+venv
+windows_venv
 .DS_Store
 *.pyc
 *.pyo
@@ -11,3 +13,18 @@ frame_generate.py
 pyproject.toml
 dist
 app
+dist
+*.egg-info
+out
+output/
+.coverage
+.coverage.*
+docs
+!docs/
+!docs/**/
+!docs/**/*.md
+!docs/**/*.png
+!docs/**/*.svg
+!docs/**/*.pdf
+scenarios
+tmp

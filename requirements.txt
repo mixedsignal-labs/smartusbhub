@@ -1,6 +1,13 @@
-colorlog
-numpy
+# Core runtime dependency
 pyserial
+
+# Example scripts (oscilloscope, plotting)
+numpy
+pyqtgraph
 PyQt5
 PyQt5_sip
-pyqtgraph
+
+# Test suite
+pytest
+pytest-html
+pytest-cov

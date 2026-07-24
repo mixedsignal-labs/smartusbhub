@@ -1,13 +1,22 @@
-# Description: basic settings and info of the SmartUSBHub
-# copyright: (c) 2024 EmbeddedTec studio
-# license: Apache-2.0
-# version: 1.0
-# author: EmbeddedTec studio
-# email:embeddedtec@outlook.com
+"""
+@file setting_example.py
+@brief basic settings and info of the SmartUSBHub
+@copyright (c) 2026 MixedSignalLab
+@license Apache-2.0
+@author zhang <mixedsignallab@outlook.com>
+@website https://www.mixedsignallab.com
+
+Run:
+    python examples/setting_example.py
+"""
 
 import sys
+import os
 import time
-sys.path.append('../')
+# Add project root to sys.path so we can import smartusbhub from any location
+script_dir = os.path.dirname(os.path.abspath(__file__)); project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 from smartusbhub import SmartUSBHub
 
 def main():
@@ -19,17 +28,27 @@ def main():
 
     device_info = hub.get_device_info()
     print("device info:", device_info)
-    
+
+    # Get and display hardware and firmware versions
+    hardware_version = hub.get_hardware_version()
+    firmware_version = hub.get_firmware_version()
+    print(f"Hardware Version: V1.{hardware_version}" if hardware_version is not None else "Hardware Version: Unknown")
+    print(f"Firmware Version: V1.{firmware_version}" if firmware_version is not None else "Firmware Version: Unknown")
+    channels = hub.get_channels()
+    print(f"Product: {hub.get_product_name() or 'N/A'}")
+    print(f"Channels: {list(channels)}")
+    print()
+
     print("Starting setting example...")
 
-    default_power_status = hub.get_default_power_status(1,2,3,4)
+    default_power_status = hub.get_default_power_status(*channels)
     if default_power_status:
         for ch, info in default_power_status.items():
             print(f"Channel {ch} default power status is {'enable' if info['enabled'] else 'disable'}, default power is {'ON' if info['value'] else 'OFF'}")
     else:
         print("Failed to get default power status")
 
-    default_dataline_status = hub.get_default_dataline_status(1,2,3,4)
+    default_dataline_status = hub.get_default_dataline_status(*channels)
     if default_dataline_status:
         for ch, info in default_dataline_status.items():
             print(f"Channel {ch} default dataline status is {'enable' if info['enabled'] else 'disable'}, default dataline is {'Connect' if info['value'] else 'Disconnect'}")
@@ -43,8 +62,8 @@ def main():
     print("device address: 0x%04X" % device_address)
 
     print("\r\nEnabling default power status on specified channels with default power set to ON.")
-    hub.set_default_power_status(1,2,3,4,enable=1,status=1)
-    default_power_status = hub.get_default_power_status(1,2,3,4)
+    hub.set_default_power_status(*channels, enable=1, status=1)
+    default_power_status = hub.get_default_power_status(*channels)
     if default_power_status:
         for ch, info in default_power_status.items():
             print(f"Channel {ch} default power status is {'enable' if info['enabled'] else 'disable'}, default power is {'ON' if info['value'] else 'OFF'}")
@@ -52,8 +71,8 @@ def main():
         print("Failed to get default power status")
 
     print("\r\nDisabling default power status on specified channels.")
-    hub.set_default_power_status(1,2,3,4,enable=0)
-    default_power_status = hub.get_default_power_status(1,2,3,4)
+    hub.set_default_power_status(*channels, enable=0)
+    default_power_status = hub.get_default_power_status(*channels)
     if default_power_status:
         for ch, info in default_power_status.items():
             print(f"Channel {ch} default power status is {'enable' if info['enabled'] else 'disable'}, default power is {'ON' if info['value'] else 'OFF'}")
@@ -61,8 +80,8 @@ def main():
         print("Failed to get default power status")
 
     print("\r\nEnabling default dataline status on specified channels with default state set to Disconnect.")
-    hub.set_default_dataline_status(1,2,3,4,enable=1,status=0)
-    default_dataline_status = hub.get_default_dataline_status(1,2,3,4)
+    hub.set_default_dataline_status(*channels, enable=1, status=0)
+    default_dataline_status = hub.get_default_dataline_status(*channels)
     if default_dataline_status:
         for ch, info in default_dataline_status.items():
             print(f"Channel {ch} default dataline status is {'enable' if info['enabled'] else 'disable'}, default dataline is {'Connect' if info['value'] else 'Disconnect'}")
@@ -70,14 +89,14 @@ def main():
         print("Failed to get default dataline status")
 
     print("\r\nDisabling default dataline status on specified channels.")
-    hub.set_default_dataline_status(1,2,3,4,enable=0)
-    default_dataline_status = hub.get_default_dataline_status(1,2,3,4)
+    hub.set_default_dataline_status(*channels, enable=0)
+    default_dataline_status = hub.get_default_dataline_status(*channels)
     if default_dataline_status:
         for ch, info in default_dataline_status.items():
             print(f"Channel {ch} default dataline status is {'enable' if info['enabled'] else 'disable'}, default dataline is {'Connect' if info['value'] else 'Disconnect'}")
     else:
         print("Failed to get default dataline status")
-    
+
     print("\r\nEnabling auto-restore feature.")
     hub.set_auto_restore(1)
     auto_restore_status = hub.get_auto_restore_status()
@@ -89,7 +108,7 @@ def main():
     print("\r\nDisabling auto-restore feature.")
     hub.set_auto_restore(0)
     auto_restore_status = hub.get_auto_restore_status()
-    if auto_restore_status is 0:
+    if auto_restore_status == 0:
         print("Auto restore is disabled.")
     else:
         print("Failed to get auto restore status")
@@ -112,7 +131,7 @@ def main():
     print("\r\nDisabling button control.")
     hub.set_button_control(0)
     button_control_status = hub.get_button_control_status()
-    if button_control_status is 0:
+    if button_control_status == 0:
         print("Button control disabled. Manual button input is now inactive.")
     else:
         print("Failed to get button control status")
@@ -121,7 +140,7 @@ def main():
     print("\r\nRe-enabling button control.")
     hub.set_button_control(1)
     button_control_status = hub.get_button_control_status()
-    if button_control_status is 1:
+    if button_control_status == 1:
         print("Button control enabled. Manual button input is now active.")
     else:
         print("Failed to get button control status")
@@ -136,9 +155,9 @@ def main():
     print("\r\nSetting example completed.")
 
     hub.disconnect()
-    
+
     sys.exit(0)
-    
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,17 @@
+SmartUSBHub Python SDK
+
+Copyright (c) 2026 MixedSignalLab
+Author: zhang <mixedsignallab@outlook.com>
+
+License notice:
+This SDK is licensed under the Apache License, Version 2.0. Under Section 4
+of Apache-2.0, redistribution of this SDK or derivative works must keep the
+license, copyright notices, and attribution notices from this NOTICE file in
+a readable form, such as a NOTICE file, accompanying documentation, release
+notes, source-code notices, or a suitable about/notice display.
+
+Chinese notice:
+如将本 SDK 或示例集成到其他系统、产品、测试平台或随软件包分发，
+请依照 Apache-2.0 第 4 条保留许可证、版权声明以及本 NOTICE 文件中的
+作者/署名信息；可放在 NOTICE 文件、随附文档、发布说明、源代码声明或
+合适的关于/声明页面中。

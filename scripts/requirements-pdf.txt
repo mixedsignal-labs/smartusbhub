@@ -1,0 +1,5 @@
+reportlab>=4.4.3,<6
+svglib>=2.0.0,<3
+pypdf>=6.0.0,<7
+Pillow>=10,<13
+fonttools>=4.55,<5

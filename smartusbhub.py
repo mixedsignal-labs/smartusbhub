@@ -1,551 +1,1119 @@
-# Description: Python class to control Smart USB Hub with serial communication.
-# copyright: (c) 2024 EmbeddedTec studio
-# license: Apache-2.0
-# version: 1.0
-# author: EmbeddedTec studio
-# email:embeddedtec@outlook.com
-# for more information: https://github.com/MrzhangF1ghter/smartusbhub
+"""
+High-level driver for controlling a Smart USB Hub over a UART serial link.
 
-# protocol examples:
+Project website: https://www.mixedsignallab.com
 
-# Single Channel ON/OFF   send                ack                
-#     ch1_on              55 5A 01 01 01 03   55 5A 01 01 01 03 
-#     ch2_on              55 5A 01 02 01 04   55 5A 01 02 01 04 
-#     ch3_on              55 5A 01 04 01 06   55 5A 01 04 01 06 
-#     ch4_on              55 5A 01 08 01 0A   55 5A 01 08 01 0A 
-#     ch1_off             55 5A 01 01 00 02   55 5A 01 01 00 02 
-#     ch2_off             55 5A 01 02 00 03   55 5A 01 02 00 03 
-#     ch3_off             55 5A 01 04 00 05   55 5A 01 04 00 05 
-#     ch4_off             55 5A 01 08 00 09   55 5A 01 08 00 09 
+The SmartUSBHub class provides robust per-port control of power and data
+connections, voltage/current monitoring, configuration of default states,
+and factory reset. It is intended for automated test systems and hardware
+development workflows.
 
-# All Channel
-#     ch_all_on           55 5A 01 0F 01 11   55 5A 01 0F 01 11  
-#     ch_all_off          55 5A 01 0F 00 10   55 5A 01 0F 00 10 
+**Wire protocol**
 
-# Combine Channel
-#     ch_13_on            55 5A 01 05 01 07   55 5A 01 05 01 07 
-#     ch_13_off           55 5A 01 05 00 06   55 5A 01 05 00 06 
-#     ch_24_on            55 5A 01 0A 01 0C   55 5A 01 0A 01 0C 
-#     ch_24_off           55 5A 01 0A 00 0B   55 5A 01 0A 00 0B 
+Three framing variants share the same serial channel; frames are
+distinguished by their start-of-frame (SOF) bytes:
 
-# Get digital level       [channel,value]     
-#     ch1_get_level       55 5A 00 01 00 01   
-#                                             55 5A 00 01 00 01 [OFF]     
-#                                             55 5A 00 01 01 02 [ON]
+- **V1** (6 bytes): ``0x55`` ``0x5A`` ``CMD`` ``CHANNEL`` ``VALUE`` ``CHECKSUM``,
+  where ``CHECKSUM`` = (CMD + CHANNEL + VALUE) & 0xFF. Used for most set/get
+  commands. ``CHANNEL`` is a bitmask (bit0 = channel 1, bit1 = channel 2, ...).
+- **V2** (7 bytes): ``0x55`` ``0x5A`` ``CMD`` ``CHANNEL`` ``VALUE0`` ``VALUE1``
+  ``CHECKSUM``. Used for 16-bit payloads (voltage/current) and for the
+  enable/value pairs of the default power/dataline commands.
+- **V3** (>=10 bytes): ``0x55`` ``0xAB`` ``0xCD`` ``0xEF`` SOF magic, followed by
+  ``CMD``, ``FLAGS``, a little-endian 16-bit ``LENGTH``, a little-endian 16-bit
+  CRC16 (poly 0x8005, init 0xFFFF, computed with the CRC field zeroed), and a
+  variable-length payload. Used for batch measurements and measurement
+  streaming. Frames whose ``FLAGS`` carry ``V3_FLAG_STREAM`` are unsolicited
+  notifications and are not acknowledged by the host.
 
-#     ch2_get_level       55 5A 00 02 00 02   
-#                                             55 5A 00 02 00 02 [OFF]     
-#                                             55 5A 00 02 01 03 [ON]
+Refer to the product documentation shipped with your release package for the
+authoritative command reference.
+"""
 
-#     ch3_get_level       55 5A 00 04 00 04  
-#                                             55 5A 00 04 00 04 [OFF]     
-#                                             55 5A 00 04 01 05 [ON]
-
-#     ch4_get_level       55 5A 00 08 00 08   
-#                                             55 5A 00 08 00 08 [OFF]     
-#                                             55 5A 00 08 01 09 [ON]
-
-#     ch_all_get_level    55 5A 00 0F 00 0F   55 5A 00 01 00 01 55 5A 00 02 00 02 55 5A 00 04 00 04 55 5A 00 08 00 08 
-
-# Initerlock mode         [channel,0x01]
-#     interlock_set_ch1   55 5A 02 01 01 04   55 5A 02 01 01 04 
-#     interlock_set_ch2   55 5A 02 02 01 05   55 5A 02 02 01 05
-#     interlock_set_ch3   55 5A 02 04 01 07   55 5A 02 04 01 07
-#     interlock_set_ch4   55 5A 02 08 01 0B   55 5A 02 08 01 0B
-#     interlock_set_all   55 5A 02 0F 01 12   55 5A 02 0F 01 12
-
-# Get Channel Voltage     [channel,0x00]      [channel,voltage]
-#     ch1_get_voltage     55 5A 03 01 00 04   55 5A 03 01 00 00 04
-#     ch2_get_voltage     55 5A 03 02 00 05   55 5A 03 02 00 00 05 
-#     ch3_get_voltage     55 5A 03 04 00 07   55 5A 03 04 00 00 07 
-#     ch4_get_voltage     55 5A 03 08 00 0B   55 5A 03 08 00 00 0B 
-
-# Get Channel Current     [channel,0x00]      [channel,current]
-#     ch1_get_current     55 5A 04 01 00 05   55 5A 04 01 00 00 05
-#     ch2_get_current     55 5A 04 02 00 06   55 5A 04 02 00 00 06
-#     ch3_get_current     55 5A 04 04 00 08   55 5A 04 04 00 00 08
-#     ch4_get_current     55 5A 04 08 00 0C   55 5A 04 08 00 00 0C
-
-# Set Channel Dataline    [channel,value]     
-#     ch1_set_data_on     55 5A 05 01 01 07   55 5A 05 01 01 07
-#     ch2_set_data_on     55 5A 05 02 01 08   55 5A 05 02 01 08
-#     ch3_set_data_on     55 5A 05 04 01 0A   55 5A 05 02 01 0A
-#     ch4_set_data_on     55 5A 05 08 01 0E   55 5A 05 08 01 0E
-
-#     ch1_set_data_off    55 5A 05 01 00 06   55 5A 05 01 00 06
-#     ch2_set_data_off    55 5A 05 02 00 07   55 5A 05 02 00 07
-#     ch3_set_data_off    55 5A 05 04 00 09   55 5A 05 02 00 09
-#     ch4_set_data_off    55 5A 05 08 00 0D   55 5A 05 08 00 0D
-    
-# All Channel
-#     ch_dataline_all_on  55 5A 05 0F 01 15   55 5A 05 0F 01 15  
-#     ch_dataline_all_off 55 5A 05 0F 00 14   55 5A 05 0F 00 14 
-
-# Get Channel Dataline    [channel,value]     
-#     ch1_get_data_status 55 5A 08 01 00 09           
-#                                             55 5A 08 01 00 09[disconnect]   
-#                                             55 5A 08 01 01 0A[connected]
-
-#     ch2_get_data_status 55 5A 08 02 00 0A   
-#                                             55 5A 08 02 00 0A[disconnect]   
-#                                             55 5A 08 02 01 0B[connected]
-
-#     ch3_get_data_status 55 5A 08 04 00 0C   
-#                                             55 5A 08 04 00 0C[disconnect]   
-#                                             55 5A 08 04 01 0D[connected]
-
-#     ch4_get_data_status 55 5A 08 08 00 10   
-#                                             55 5A 08 08 00 10[disconnect]   
-#                                             55 5A 08 08 01 11[connected]
-
-#     All Channel
-#     ch_all_get_dataline 55 5A 08 0F 00 17   
-
-# Set Button control Mode [0x00,enable]
-#     disable_btn_control 55 5A 09 00 00 09   55 5A 09 00 00 09
-#     enable_btn_control  55 5A 09 00 01 0A   55 5A 09 00 01 0A
-
-# Get Button control Mode [0x00,value]
-#     get_btn_control     55 5A 0A 00 00 0A   55 5A 0A 00 00 0A [disable] 55 5A 0A 00 01 0B[enable]
-
-# Set default power status [channel,enable,value] protocol_v2
-#     ch1_set_default_power_status_enable_on      55 5A 0B 01 01 01 0E    55 5A 0B 01 01 01 0E [default power status enable,value is on]
-#     ch2_set_default_power_status_enable_on      55 5A 0B 02 01 01 0F    55 5A 0B 02 01 01 0F [default power status enable,value is on]
-#     ch3_set_default_power_status_enable_on      55 5A 0B 04 01 01 11    55 5A 0B 04 01 01 11 [default power status enable,value is on]
-#     ch4_set_default_power_status_enable_on      55 5A 0B 08 01 01 15    55 5A 0B 08 01 01 15 [default power status enable,value is on]
-#     all_ch_set_default_power_status_enable_on   55 5A 0B 0F 01 01 1C    55 5A 0B 0F 01 01 1C [all default power status enable,value is on]
-
-#     ch1_set_default_power_status_enable_off     55 5A 0B 01 01 00 0D    55 5A 0B 01 01 00 0D [default power status enable,value is off]
-#     ch2_set_default_power_status_enable_off     55 5A 0B 02 01 00 0E    55 5A 0B 02 01 00 0E [default power status enable,value is off]
-#     ch3_set_default_power_status_enable_off     55 5A 0B 04 01 00 10    55 5A 0B 04 01 00 10 [default power status enable,value is off]
-#     ch4_set_default_power_status_enable_off     55 5A 0B 08 01 00 14    55 5A 0B 08 01 00 14 [default power status enable,value is off]
-#     all_ch_set_default_power_status_enable_off  55 5A 0B 0F 01 00 1B    55 5A 0B 0F 01 00 1B [all default power status enable,value is off]
-
-#     ch1_set_default_power_status_disable        55 5A 0B 01 00 00 0C    55 5A 0B 01 00 0C [default power status disable]
-#     ch2_set_default_power_status_disable        55 5A 0B 02 00 00 0D    55 5A 0B 02 00 0D [default power status disable]
-#     ch3_set_default_power_status_disable        55 5A 0B 04 00 00 0F    55 5A 0B 04 00 0F [default power status disable]
-#     ch4_set_default_power_status_disable        55 5A 0B 08 00 00 13    55 5A 0B 08 00 13 [default power status disable]
-#     all_ch_set_default_power_status_disable     55 5A 0B 0F 00 00 1A    55 5A 0B 0F 00 00 1A [all default power status enable,value is off]
-
-# Get default power status [channel,enable,value] protocol_v2                     
-#     ch1_get_default_power_status                55 5A 0C 01 00 00 0D            
-#                                                                         55 5A 0C 01 00 00 0D [default power status disabled, poweroff]    
-#                                                                         55 5A 0C 01 01 01 0F [default power status enable, poweron]
-
-#     ch2_get_default_power_status                55 5A 0C 02 00 00 0E    
-#                                                                         55 5A 0C 02 00 00 0E [default power status disabled, poweroff]    
-#                                                                         55 5A 0C 02 01 01 10 [default power status enable, poweron]
-
-#     ch3_get_default_power_status                55 5A 0C 04 00 00 10    
-#                                                                         55 5A 0C 04 00 00 10 [default power status disabled, poweroff]   
-#                                                                         55 5A 0C 04 01 01 12 [default power status enable, poweron]
-
-#     ch4_get_default_power_status                55 5A 0C 08 00 00 14    
-#                                                                         55 5A 0C 08 00 00 14 [default power status disabled, poweroff]    
-#                                                                         55 5A 0C 08 01 01 16 [default power status enable, poweron]
-#     all_ch_get_default_power_status             55 5A 0C 0F 00 00 1B
-
-# Set default dataline status [channel,enable,value] protocol_v2
-#     ch1_set_default_dataline_status_enable_on   55 5A 0D 01 01 01 10    55 5A 0D 01 01 01 10 [default dataline status enable, connected]
-#     ch2_set_default_dataline_status_enable_on   55 5A 0D 02 01 01 11    55 5A 0D 02 01 01 11 [default dataline status enable, connected]
-#     ch3_set_default_dataline_status_enable_on   55 5A 0D 04 01 01 13    55 5A 0D 04 01 01 13 [default dataline status enable, connected]
-#     ch4_set_default_dataline_status_enable_on   55 5A 0D 08 01 01 17    55 5A 0D 08 01 01 17 [default dataline status enable, connected]
-#     all_ch_set_default_power_status_enable_on   55 5A 0D 0F 01 01 1E    55 5A 0D 0F 01 01 1E [all default dataline status enable, connected]
-
-#     ch1_set_default_dataline_status_enable_off  55 5A 0D 01 01 00 0F    55 5A 0D 01 01 01 0F [default dataline status enable, connected]
-#     ch2_set_default_dataline_status_enable_off  55 5A 0D 02 01 00 10    55 5A 0D 02 01 01 10 [default dataline status enable, connected]
-#     ch3_set_default_dataline_status_enable_off  55 5A 0D 04 01 00 12    55 5A 0D 04 01 01 12 [default dataline status enable, connected]
-#     ch4_set_default_dataline_status_enable_off  55 5A 0D 08 01 00 16    55 5A 0D 08 01 01 16 [default dataline status enable, connected]
-#     all_ch_set_default_power_status_enable_off  55 5A 0D 0F 01 00 1D    55 5A 0D 0F 01 00 1D [all default dataline status enable, disconnected]
-
-#     ch1_set_default_dataline_status_disable     55 5A 0D 01 00 00 0E    55 5A 0D 01 00 00 0E [default dataline status disable, connected]
-#     ch2_set_default_dataline_status_disable     55 5A 0D 02 00 00 0F    55 5A 0D 02 00 00 0F [default dataline status disable, connected]
-#     ch3_set_default_dataline_status_disable     55 5A 0D 04 00 00 11    55 5A 0D 04 00 00 11 [default dataline status disable, connected]
-#     ch4_set_default_dataline_status_disable     55 5A 0D 08 00 00 15    55 5A 0D 08 00 00 15 [default dataline status disable, connected]
-#     all_ch_set_default_dataline_status_disable  55 5A 0D 0F 00 01 1D    55 5A 0D 0F 00 01 1D [all default dataline status disable, connected]
-
-# Get default dataline status [channel,enable,value] protocol_v2
-#     ch1_get_default_dataline_status             55 5A 0E 01 00 00 0F            
-#                                                                         55 5A 0E 01 00 01 10 [default dataline status disabled, dataline connected]    
-#                                                                         55 5A 0E 01 01 00 10 [default dataline status enabled, dataline disconnected]    
-#                                                                         55 5A 0E 01 01 01 11 [default dataline status enabled, dataline connected]
-
-#     ch2_get_default_dataline_status             55 5A 0E 02 00 00 10    
-#                                                                         55 5A 0E 02 00 01 11 [default dataline status disabled, dataline connected]    
-#                                                                         55 5A 0E 02 01 00 11 [default dataline status enabled, dataline disconnected]    
-#                                                                         55 5A 0E 02 01 01 12 [default dataline status enabled, dataline connected]
-
-#     ch3_get_default_dataline_status             55 5A 0E 04 00 00 12    
-#                                                                         55 5A 0E 04 00 01 13 [default dataline status disabled, dataline connected]    
-#                                                                         55 5A 0E 04 01 00 13 [default dataline status enabled, dataline disconnected]    
-#                                                                         55 5A 0E 04 00 01 13 [default dataline status enabled, dataline connected]
-
-#     ch4_get_default_dataline_status             55 5A 0E 08 00 00 16    
-#                                                                         55 5A 0E 08 00 01 17 [default dataline status disabled, dataline connected]    
-#                                                                         55 5A 0E 08 00 01 17 [default dataline status enabled, dataline disconnected]    
-#                                                                         55 5A 0E 08 00 01 17 [default dataline status enabled, dataline connected]
-
-#     all_ch_get_default_dataline_status          55 5A 0E 0F 00 00 1D
-    
-# Set auto restore [0x00,value]
-#     enable auto restore                         55 5A 0F 00 01 10   55 5A 0F 00 01 10
-#     disable auto restore                        55 5A 0F 00 00 0F   55 5A 0F 00 00 0F
-
-# Get auto restore state                          55 5A 10 00 00 10   
-#                                                                     55 5A 10 00 01 11[enable]   
-#                                                                     55 5A 10 00 00 10[disable]
-
-# Set Operate Mode [0x00,mode]
-#     oper_mode_normal    55 5A 06 00 00 06   55 5A 06 00 00 06
-#     oper_mode_interlock 55 5A 06 00 01 07   55 5A 06 00 01 07
-
-# Get Operate Mode        55 5A 07 00 00 07
-#                                             55 5A 07 00 00 07 [normal]
-#                                             55 5A 07 00 01 08 [interlock]
-
-# Set device address [MSB] [LSB]
-#     device address:0x0000     55 5A 11 00 00 11
-#     device address:0x0001     55 5A 11 00 01 12
-#     device address:0x0002     55 5A 11 00 02 13
-#     device address:0x0003     55 5A 11 00 03 14
-#     device address:0x1A01     55 5A 11 1A 01 2C
-
-# Get device address
-#     55 5A 12 00 00 12
-#                         55 5A 12 00 00 12  [device address:0x0000]
-#                         55 5A 12 00 01 13  [device address:0x0001]
-
-# Factory Reset           55 5A FC 00 00 FC   55 5A FC 00 00 FC
-
-# Get software version    55 5A FD 00 00 FD   55 5A FD 00 0F 0C
-
-# Get hardware version    55 5A FE 00 00 FE   55 5A FE 00 03 01
+import os
+import time
+import atexit
+import logging
+import weakref
+import tempfile
+import threading
+from functools import wraps
 
 import serial
 import serial.tools.list_ports
-import time
-import threading
-import signal
-import sys
-import logging
-import colorlog
 
-# Command definitions
-CMD_GET_CHANNEL_POWER_STATUS        = 0x00
-CMD_SET_CHANNEL_POWER               = 0x01
+__version__ = "1.2.0"
 
-CMD_SET_CHANNEL_POWER_INTERLOCK     = 0x02
+# Cross-process file lock support: prefer fcntl (Unix/Linux/macOS), fall back to
+# msvcrt (Windows). When neither is available, port locking degrades to a
+# process-local check only. Both flags are always defined so either may be
+# tested unconditionally.
+HAS_FCNTL = False
+HAS_MSVCRT = False
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    try:
+        import msvcrt
+        HAS_MSVCRT = True
+    except ImportError:
+        pass
+class SmartUSBHubError(Exception):
+    """
+    Base class for all errors raised by this library.
 
-CMD_GET_CHANNEL_VOLTAGE             = 0x03
-CMD_GET_CHANNEL_CURRENT             = 0x04
+    Catch this to handle any SmartUSBHub-specific failure regardless of subtype.
+    """
+    pass
 
-CMD_SET_CHANNEL_DATALINE            = 0x05
-CMD_GET_CHANNEL_DATALINE_STATUS     = 0x08
+class PortBusyError(SmartUSBHubError, ValueError):
+    """
+    Raised when a serial port is already in use by another instance or process.
 
-CMD_SET_BUTTON_CONTROL              = 0x09
-CMD_GET_BUTTON_CONTROL_STATUS       = 0x0A
+    Also subclasses ``ValueError`` for backward compatibility with callers that
+    previously caught the ``ValueError`` raised on a busy port.
+    """
+    pass
 
-CMD_SET_DEFAULT_POWER_STATUS        = 0x0B
-CMD_GET_DEFAULT_POWER_STATUS        = 0x0C
+class DeviceConnectionError(SmartUSBHubError):
+    """
+    Raised when a device does not respond during connection setup.
 
-CMD_SET_DEFAULT_DATALINE_STATUS     = 0x0D
-CMD_GET_DEFAULT_DATALINE_STATUS     = 0x0E
+    Typically means the port is not a SmartUSBHub or the device is unresponsive.
+    """
+    pass
 
-CMD_SET_AUTO_RESTORE                = 0x0F
-CMD_GET_AUTO_RESTORE_STATUS         = 0x10
+class FeatureNotSupportedError(SmartUSBHubError, ValueError):
+    """
+    Raised when a requested feature is not supported by the connected product model.
 
-CMD_SET_OPERATE_MODE                = 0x06
-CMD_GET_OPERATE_MODE                = 0x07
+    Also subclasses ``ValueError`` for backward compatibility.
+    """
+    pass
 
-CMD_SET_DEVICE_ADDRESS              = 0x11
-CMD_GET_DEVICE_ADDRESS              = 0x12
 
-CMD_FACTORY_RESET                   = 0xFC   
-CMD_GET_FIRMWARE_VERSION            = 0xFD
-CMD_GET_HARDWARE_VERSION            = 0xFE
+# --- Command codes -----------------------------------------------------------
+CMD_GET_CHANNEL_POWER_STATUS        = 0x00  # query channel VBUS power state
+CMD_SET_CHANNEL_POWER               = 0x01  # set channel VBUS power state
+CMD_SET_CHANNEL_POWER_INTERLOCK     = 0x02  # select one powered channel, or clear interlock
+CMD_GET_CHANNEL_VOLTAGE             = 0x03  # query one channel voltage sample
+CMD_GET_CHANNEL_CURRENT             = 0x04  # query one channel current sample
+CMD_SET_CHANNEL_DATALINE            = 0x05  # set USB2 D+/D- data-line switch state
+CMD_GET_CHANNEL_DATALINE_STATUS     = 0x08  # query USB2 D+/D- data-line switch state
 
-# Channel value definitions
-CHANNEL_1 = 0x01
-CHANNEL_2 = 0x02
-CHANNEL_3 = 0x04
-CHANNEL_4 = 0x08
+CMD_SET_BUTTON_CONTROL              = 0x09  # enable or disable front-panel button control
+CMD_GET_BUTTON_CONTROL_STATUS       = 0x0A  # query front-panel button-control state
 
+CMD_SET_DEFAULT_POWER_STATUS        = 0x0B  # set boot/default VBUS power state
+CMD_GET_DEFAULT_POWER_STATUS        = 0x0C  # query boot/default VBUS power state
+CMD_SET_DEFAULT_DATALINE_STATUS     = 0x0D  # set boot/default USB2 data-line state
+CMD_GET_DEFAULT_DATALINE_STATUS     = 0x0E  # query boot/default USB2 data-line state
+
+CMD_SET_AUTO_RESTORE                = 0x0F  # enable or disable power-loss auto-restore
+CMD_GET_AUTO_RESTORE_STATUS         = 0x10  # query power-loss auto-restore state
+
+CMD_SET_OPERATE_MODE                = 0x06  # set device operating mode
+CMD_GET_OPERATE_MODE                = 0x07  # query device operating mode
+
+CMD_SET_DEVICE_ADDRESS              = 0x11  # set multi-hub device address
+CMD_GET_DEVICE_ADDRESS              = 0x12  # query multi-hub device address
+
+CMD_GET_CHANNEL_MEASUREMENTS        = 0x1A  # V3 query/stream: voltage/current samples
+CMD_GET_CHANNEL_OC_STATUS           = 0x1B  # query/unsolicited: channel=active_mask, value=latch_mask
+CMD_CLEAR_CHANNEL_OC_LATCH          = 0x1C  # clear the sticky OC latch for a channel mask
+CMD_IDENTIFY_DEVICE                 = 0x1D  # quick blink status LED to locate device
+CMD_SET_CHANNEL_NAME                = 0x1E  # V3 payload: [channel(1-based), utf8 name]
+CMD_GET_CHANNEL_NAME                = 0x1F  # V3 payload: request/response [channel(1-based), utf8 name]
+CMD_SET_DEVICE_ALIAS                = 0x20  # V3 payload: utf8 alias
+CMD_GET_DEVICE_ALIAS                = 0x21  # V3 payload response: utf8 alias
+CMD_REBOOT_MCU                      = 0xF7  # reboot the device MCU
+CMD_GET_SERIAL_NO                   = 0xF9  # query device serial number
+CMD_GET_PRODUCT_TYPE                = 0xF0  # query product-type code
+CMD_GET_MAX_CHANNELS                = 0xF1  # query maximum supported channel count
+CMD_FACTORY_RESET                   = 0xFC  # restore persistent settings to factory defaults
+CMD_GET_FIRMWARE_VERSION            = 0xFD  # query firmware version
+CMD_GET_HARDWARE_VERSION            = 0xFE  # query hardware version
+
+# --- V3 framing constants ----------------------------------------------------
+V3_MAGIC                            = (0x55, 0xAB, 0xCD, 0xEF)  # 4-byte SOF magic
+V3_HEADER_LEN                       = 10   # 4 SOF + cmd + flags + length(2) + crc(2)
+V3_MAX_FRAME_LEN                    = 64
+V3_MAX_DATA_LEN                     = V3_MAX_FRAME_LEN - V3_HEADER_LEN
+V3_FLAG_STREAM                      = 0x01
+V3_MEAS_FLAG_FORCE_SAMPLE           = 0x01
+V3_MEAS_FLAG_STREAM_ENABLE          = 0x02
+V3_MEAS_FLAG_STREAM_DISABLE         = 0x04
+V3_STATUS_OK                        = 0x00
+
+# --- Operating modes ---------------------------------------------------------
+# Channels are addressed by 1-based number throughout the public API (e.g.
+# set_channel_power(1, 2, state=1)); the wire-level bitmask is derived
+# internally, so no per-channel constants are exposed.
 OPERATE_MODE_NORMAL = 0
 OPERATE_MODE_INTERLOCK = 1
 
-# Configure logging
-logger = logging.getLogger(__name__)
-# log level
-logger.setLevel(logging.ERROR)
-
-# Create console handler with a higher log level
-ch = colorlog.StreamHandler()
-
-console_formatter = colorlog.ColoredFormatter(
-    "%(log_color)s%(asctime)s - %(levelname)s - %(message)s",
-    datefmt=None,
-    reset=True,
-    log_colors={
-        "DEBUG": "white",
-        "INFO": "green",
-        "WARNING": "yellow",
-        "ERROR": "red",
-        "CRITICAL": "red,bg_white",
+# Product capability table keyed by product-type ID.
+#
+# Each entry describes hardware capabilities. A True value does not by itself
+# guarantee that this SDK version exposes a public control method for that
+# capability (USB3/ILIM are currently metadata-only):
+# - ``name``: short product identifier
+# - ``channels``: number of channels
+# - ``description``: human-readable description
+# - ``enable_adc``: voltage/current monitoring supported
+# - ``enable_usb2_data_switch``: USB2.0 data-line switching supported
+# - ``enable_usb3_data_switch``: USB3.0 data-line switching supported
+# - ``enable_ilim_switch``: current-limit / slow-fast charge switching supported
+# - ``ack_timeout``: per-command ACK timeout in seconds
+PRODUCT_TYPE_TABLE = {
+    0x00: {
+        "name": "HBP_USB2_4CH",
+        "channels": 4,
+        "description": "USB2.0 4-channel hub",
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.1,
     },
-)
-ch.setFormatter(console_formatter)
+    0x01: {
+        "name": "HBP_USB2_2CH",
+        "channels": 2,
+        "description": "USB2.0 2-channel hub",
+        "enable_adc": False,
+        "enable_usb2_data_switch": False,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.1,
+    },
+    0x02: {
+        "name": "HBP_USB2_7CH",
+        "channels": 7,
+        "description": "USB2.0 7-channel hub",
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.1,
+    },
+    0x03: {
+        "name": "HBP_USB2_7CH_ADV",
+        "channels": 7,
+        "description": "USB2.0 7-channel hub with INA3221 voltage/current monitoring",
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.1,
+    },
+    0x04: {
+        "name": "HBP_USB3_4CH",
+        "channels": 4,
+        "description": "USB3.0 4-channel hub",
+        "enable_adc": False,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": True,
+        "enable_ilim_switch": True,
+        "ack_timeout": 0.1,
+    },
+    0x05: {
+        "name": "HBL_USB2_4CH",
+        "channels": 4,
+        "description": "USB2.0 4-channel power-control hub with overcurrent reporting",
+        "enable_adc": False,
+        "enable_usb2_data_switch": False,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "enable_overcurrent": True,
+        "ack_timeout": 0.1,
+    },
+}
 
-# Add the handlers to the logger
-logger.addHandler(ch)
+# Library logging follows the standard practice of attaching only a NullHandler;
+# the consuming application is responsible for configuring handlers and levels.
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
-class SmartUSBHub:
+# When False, the synchronized decorator becomes a no-op.
+#
+# Intended for tests that need to exercise behaviour without the per-instance
+# command lock. Leave True in production.
+ENABLE_SYNC_LOCK = True
+
+
+def synchronized(method):
     """
-    SmartUSBHub Lib provides a high-level interface for interacting with an industrial Smart USB Hub via UART.
+    Decorator that serializes access to a SmartUSBHub method via the instance lock.
 
-    This class enables robust per-port control of power and data connections, voltage/current monitoring,
-    configuration of default states, and factory resets.
+    When ``ENABLE_SYNC_LOCK`` is True the wrapped method acquires ``self.lock`` for
+    its whole duration; when False it runs without locking.
 
-    Suitable for automated test systems and development workflows in hardware engineering environments.
+    :param method: The instance method to wrap.
+
+    :returns: The wrapped method.
     """
 
-    def __init__(self, port):
+    @wraps(method)
+    def _synchronized(self, *args, **kwargs):
+        if ENABLE_SYNC_LOCK:
+            with self.lock:
+                return method(self, *args, **kwargs)
+        return method(self, *args, **kwargs)
+    return _synchronized
+
+
+class _Codec:
+    """
+    Pure wire-protocol codec for the SmartUSBHub serial link (no I/O, no state).
+
+    All framing knowledge — the V1/V2/V3 layouts, the CRC16, the V1 checksum and
+    the per-command V1-vs-V2 sizing — lives here in one place, so the send path,
+    the receive loop's frame-sizing and the parser can never disagree. Every method
+    is a pure function of its arguments and is unit-testable without a device.
+    """
+
+    # Reply frames that use the 7-byte V2 framing (two payload bytes); every other
+    # V1/V2 reply uses the 6-byte V1 framing. This is the per-command sizing table
+    # the parser and the receive loop both consult.
+    V2_REPLY_COMMANDS = (
+        CMD_GET_CHANNEL_VOLTAGE, CMD_GET_CHANNEL_CURRENT,
+        CMD_SET_DEFAULT_POWER_STATUS, CMD_SET_DEFAULT_DATALINE_STATUS,
+        CMD_GET_DEFAULT_POWER_STATUS, CMD_GET_DEFAULT_DATALINE_STATUS,
+    )
+
+    @staticmethod
+    def crc16(data):
+        """Compute a CRC16 over ``data`` (poly 0x8005, init 0xFFFF), used by V3."""
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0x8005
+                else:
+                    crc = crc >> 1
+        return crc & 0xFFFF
+
+    @staticmethod
+    def encode_v1v2(cmd, channel_mask, data):
         """
-        Initializes the Smart USB Hub.
+        Build a V1/V2 frame ``55 5A | cmd | mask | data... | checksum``.
 
-        Args:
-            port (str): The serial port name to connect to the device.
+        :param cmd: Command byte.
+
+        :param channel_mask: Channel-mask byte (the caller derives it).
+
+        :param data: Iterable of payload bytes following the mask.
+
+        :returns: The frame bytearray.
         """
-        self.port = port
-        self.ser = serial.Serial(port, 115200,timeout = 0.5)
-        self.com_timeout = 0.1
-        logger.info(f"SmartUSBHub initialized on port {self.port}")
+        payload = [channel_mask] + list(data)
+        packet = bytearray([0x55, 0x5A, cmd])
+        packet.extend(payload)
+        packet.append((cmd + sum(payload)) & 0xFF)
+        return packet
 
-        self.ack_events = {
-            CMD_GET_OPERATE_MODE: threading.Event(),
-            CMD_SET_OPERATE_MODE: threading.Event(),
-            CMD_SET_CHANNEL_POWER: threading.Event(),
-            CMD_GET_CHANNEL_POWER_STATUS: threading.Event(),
-            CMD_SET_CHANNEL_POWER_INTERLOCK: threading.Event(),
-            CMD_GET_CHANNEL_VOLTAGE: threading.Event(),
-            CMD_GET_CHANNEL_CURRENT: threading.Event(),
-            CMD_SET_CHANNEL_DATALINE: threading.Event(),
-            CMD_GET_CHANNEL_DATALINE_STATUS: threading.Event(),
-            CMD_SET_BUTTON_CONTROL: threading.Event(),
-            CMD_GET_BUTTON_CONTROL_STATUS: threading.Event(),
-            CMD_SET_DEFAULT_POWER_STATUS: threading.Event(),
-            CMD_GET_DEFAULT_POWER_STATUS: threading.Event(),
-            CMD_SET_DEFAULT_DATALINE_STATUS: threading.Event(),
-            CMD_GET_DEFAULT_DATALINE_STATUS: threading.Event(),
-            CMD_SET_AUTO_RESTORE: threading.Event(),
-            CMD_GET_AUTO_RESTORE_STATUS: threading.Event(),
-            CMD_SET_DEVICE_ADDRESS: threading.Event(),
-            CMD_GET_DEVICE_ADDRESS: threading.Event(),
-            CMD_FACTORY_RESET:threading.Event(),
-            CMD_GET_FIRMWARE_VERSION: threading.Event(),
-            CMD_GET_HARDWARE_VERSION: threading.Event(),
-        }
-        
-        self.callbacks = {cmd: None for cmd in self.ack_events.keys()}
-        
-        self.poweroff_recover = None
-        self.hardware_version = None
-        self.firmware_version = None
-        self.operate_mode = None
-        self.auto_restore_status = None
-        self.button_control_status = None
-
-        self.channel_default_power_flag = {}
-        self.channel_default_power_status = {}
-        self.channel_default_dataline_flag = {}
-        self.channel_default_dataline_status = {}
-
-        self.channel_power_status = {}
-        self.channel_dataline_status = {}
-        self.channel_voltages = {}
-        self.channel_currents = {}
-
-        self.device_address = None
-
-        self.disconnect_callback = None
-
-        self._start()
-        self.get_device_info()
-        
-        if self.get_operate_mode is None:
-            logger.error("Failed to get operate mode.")
-            sys.exit(1)
-            
-        logger.info(f"Hardware version: V1.{self.hardware_version}")
-        logger.info(f"Firmware version: V1.{self.firmware_version}")
-        logger.info(f"Operate mode: {'normal' if self.operate_mode == 0 else 'interlock'}")
-        logger.info(f"button control: {'enable' if self.button_control_status == 1 else 'disabled'}")
-
-    def register_disconnect_callback(self, callback):
+    @staticmethod
+    def encode_v3(cmd, payload=b""):
         """
-        Registers a callback to be called when the hub is disconnected.
-        Args:
-            callback (function): The callback function to execute on disconnect.
-        """
-        self.disconnect_callback = callback
+        Build a V3 frame ``55 AB CD EF | cmd | flags | len(2) | crc16(2) | payload``.
 
+        Accepts payload as bytes, bytearray, list of ints, or a single int.
 
-    def register_callback(self, cmd, callback):
-        """
-        Registers a user callback for a specific command.
+        :param cmd: Command byte.
 
-        Args:
-            cmd (int): The command for which the callback is registered.
-            callback (function): The callback function to execute when the command's ACK is received.
-        """
-        if cmd in self.callbacks:
-            self.callbacks[cmd] = callback
-            logger.info(f"Callback registered for command: {cmd:#04x}")
-        else:
-            logger.warning(f"Invalid command: {cmd:#04x}. Cannot register callback.")
-    
-    def _invoke_callback(self, cmd, *args, **kwargs):
-        """
-        Invokes the user callback for a specific command, if registered.
+        :param payload: Payload bytes (or list/int).
 
-        Args:
-            cmd (int): The command for which the callback is invoked.
-            *args: Positional arguments to pass to the callback.
-            **kwargs: Keyword arguments to pass to the callback.
-        """
-        if cmd in self.callbacks and self.callbacks[cmd]:
-            try:
-                self.callbacks[cmd](*args, **kwargs)
-            except Exception as e:
-                logger.error(f"Error in callback for command {cmd:#04x}: {e}")
-                
-    @classmethod
-    def scan_available_ports(cls):
-        """
-        Scan for all available serial ports and return a list of port names
-        that match specific VID and PID.
-        """
-        ports = serial.tools.list_ports.comports()
-        port_list = []
+        :returns: The frame bytearray.
 
-        for port in ports:
-            if port.vid == 0x1A86 and port.pid == 0xfe0c:
-                port_list.append(port.device)
+        :raises ValueError: If the payload exceeds ``V3_MAX_DATA_LEN.``
+        """
+        if payload is None:
+            payload = b""
+        elif isinstance(payload, list):
+            payload = bytes(payload)
+        elif not isinstance(payload, (bytes, bytearray)):
+            payload = bytes([payload])
+        payload = bytes(payload)
 
-        return port_list
-    
-    @classmethod
-    def scan_and_connect(cls):
-        """
-        Searches for available Smart USB Hub devices and connects to the first valid one.
+        if len(payload) > V3_MAX_DATA_LEN:
+            raise ValueError(f"V3 payload too large: {len(payload)} > {V3_MAX_DATA_LEN}")
 
-        Returns:
-            SmartUSBHub or None: An instance of SmartUSBHub if found, otherwise None.
-        """
-        for port_info in serial.tools.list_ports.comports():
-            port_name = port_info.device
-            logger.debug(f"Trying to connect to port {port_name}")
-            if port_info.vid == 0x1A86 and port_info.pid == 0xfe0c:
-                hub = cls(port_name)
-                port_suffix = port_name.split("/")[-1]
-                hub.name = f"smarthub_id:{port_suffix}"
-                return hub
+        # Header: [0-3] SOF magic, [4] cmd, [5] flags, [6-7] length, [8-9] crc16.
+        packet = bytearray([
+            0x55, 0xAB, 0xCD, 0xEF,
+            cmd & 0xFF,
+            0x00,
+            len(payload) & 0xFF,
+            (len(payload) >> 8) & 0xFF,
+            0x00, 0x00,
+        ]) + payload
+        crc = _Codec.crc16(packet)
+        packet[8] = crc & 0xFF
+        packet[9] = (crc >> 8) & 0xFF
+        return packet
 
-        logger.error("No Smart USB Hub found.")
-        return None
-    
-    def _start(self):
+    @staticmethod
+    def parse_frame(data):
         """
-        Starts background threads and signal handlers for UART communication and SIGINT handling.
-        """
-        self.stop_event = threading.Event()
-        signal.signal(signal.SIGINT, self._signal_handler)
-        self.uart_recv_thread = threading.Thread(target=self._uart_recv_task)
-        self.uart_recv_thread.start()
-    
-    def disconnect(self):
-        """
-        Disconnects from the device and stops the UART receive thread.
-        """
-        self.stop_event.set()
-        self.uart_recv_thread.join(timeout=1)
-        if self.ser and self.ser.is_open:
-            self.ser.flush()
-            self.ser.close()
-    def is_connected(self):
-        """
-        Check if the device's serial port is connected and open.
+        Parse one frame from the front of ``data`` (V1/V2/V3).
 
-        Returns:
-            bool: True if the serial port is open, False otherwise.
+        :param data: Raw bytes received from the device.
+
+        :returns: Tuple (cmd, channel, value, length) on success, else None when the
+            buffer holds only a partial frame or the frame is invalid. For V3 frames,
+            channel is 0 and value is a dict {"v3", "stream", "payload"}.
         """
-        return self.ser.is_open if self.ser else False
-
-    def _signal_handler(self, sig, frame):
-        """
-        Handles termination signals to cleanly shut down the UART thread and close the serial port.
-
-        Args:
-            sig (int): Signal number.
-            frame (frame object): Current stack frame.
-        """
-        self.stop_event.set()
-        self.uart_recv_thread.join(timeout=1)
-        if self.ser and self.ser.is_open:
-            self.ser.flush()
-            self.ser.close()
-        sys.exit(0)
-
-    def _parse_protocol_frame(self, data):
-        """
-        Processes a raw data frame from the device and delivers it to the correct handler.
-
-        Args:
-            data (bytes): Raw bytes read from the device.
-
-        Returns:
-            tuple or None: Parsed command, channel, value, and length if valid, otherwise None.
-        """
-
-        # logger.debug(f"Received data: {data.hex()}")
-
         if len(data) < 6:
             return None
 
+        # V3 protocol: 4-byte SOF magic 0x55 0xAB 0xCD 0xEF.
+        if data[0] == 0x55 and data[1] == 0xAB:
+            if len(data) < V3_HEADER_LEN:
+                return None
+            if data[2] != 0xCD or data[3] != 0xEF:
+                logger.debug(f"V3 magic mismatch: {data[2]:02X} {data[3]:02X}")
+                return None
+
+            # Header: [0-3] magic, [4] cmd, [5] flags, [6-7] length, [8-9] crc16.
+            cmd = data[4]
+            flags = data[5]
+            data_length = data[6] | (data[7] << 8)
+            if data_length > V3_MAX_DATA_LEN:
+                logger.debug(f"Invalid V3 payload length: {data_length} > {V3_MAX_DATA_LEN}")
+                return None
+            received_crc16 = data[8] | (data[9] << 8)
+
+            total_length = V3_HEADER_LEN + data_length
+            if len(data) < total_length:
+                return None
+
+            crc_data = bytearray(data[:total_length])
+            crc_data[8] = 0   # zero the CRC field before verification
+            crc_data[9] = 0
+            calculated_crc16 = _Codec.crc16(crc_data)
+            if calculated_crc16 != received_crc16:
+                logger.debug(f"Invalid V3 CRC16: calculated={calculated_crc16:04X}, "
+                             f"received={received_crc16:04X}")
+                return None
+
+            data_value = {
+                "v3": True,
+                "stream": bool(flags & V3_FLAG_STREAM),
+                "payload": bytes(data[V3_HEADER_LEN:total_length]),
+            }
+            logger.debug(f"Received V3 frame: cmd={cmd:04X}, length={data_length}")
+            return (cmd, 0, data_value, total_length)
+
+        # V1/V2 protocol: SOF 0x55 0x5A.
         if data[0] != 0x55 or data[1] != 0x5A:
             return None
 
         cmd = data[2]
         channel = data[3]
 
-        if cmd in [CMD_GET_CHANNEL_VOLTAGE,
-                    CMD_GET_CHANNEL_CURRENT,
-                    CMD_SET_DEFAULT_POWER_STATUS,
-                    CMD_SET_DEFAULT_DATALINE_STATUS,
-                    CMD_GET_DEFAULT_POWER_STATUS,
-                    CMD_GET_DEFAULT_DATALINE_STATUS]:
-           
-            logger.debug(f"Received protocol_v2 data for channel {self._convert_channel(channel)}")
+        if cmd in _Codec.V2_REPLY_COMMANDS:
+            # V2 frame: two payload bytes.
             if len(data) < 7:
                 return None
             value_0 = data[4]
             value_1 = data[5]
             checksum = data[6]
-            cal_sum = (cmd + channel + value_0 + value_1) & 0xFF
-            if cal_sum != checksum:
-                logger.debug(f"Invalid checksum for protocol_v2 data for channel {channel},cal:{cal_sum},recv:{checksum}")
+            if (cmd + channel + value_0 + value_1) & 0xFF != checksum:
+                logger.debug(f"Invalid V2 checksum for channel {channel}")
                 return None
-            # Combine two bytes into a single value
-            return (cmd, channel, [value_0,value_1], 7)
+            return (cmd, channel, [value_0, value_1], 7)
+
+        # V1 frame: single payload byte.
+        value = data[4]
+        checksum = data[5]
+        if (cmd + channel + value) & 0xFF != checksum:
+            return None
+        return (cmd, channel, value, 6)
+
+
+class _PortLock:
+    """
+    Cross-process exclusive lock for a serial port, backed by an OS file lock.
+
+    Uses ``fcntl`` on Unix/macOS and ``msvcrt`` on Windows; where neither exists the
+    lock degrades to success (the caller's in-process port registry still prevents
+    double-open within one process). A lock file left behind by a dead process is
+    detected via its recorded PID and reaped, so a crashed owner never wedges a port
+    permanently. State and behaviour are identical to the former ``SmartUSBHub``
+    classmethods; this just isolates the OS-specific locking in one testable unit.
+    """
+
+    _locks = {}        # {port: open lock-file handle}
+    _lock_dir = None   # lock-file directory (lazily created)
+
+    @classmethod
+    def _get_lock_dir(cls):
+        """
+        Return the directory used to store per-port lock files, creating it if needed.
+
+        :returns: Absolute path to the lock-file directory.
+        """
+        if cls._lock_dir is None:
+            cls._lock_dir = os.path.join(tempfile.gettempdir(), 'smartusbhub_locks')
+            os.makedirs(cls._lock_dir, exist_ok=True)
+        return cls._lock_dir
+
+    @classmethod
+    def _check_process_exists(cls, pid):
+        """
+        Check whether a process with the given PID currently exists.
+
+        :param pid: Process ID to probe.
+
+        :returns: True if the process exists, False otherwise.
+        """
+        try:
+            if os.name == 'nt':
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_INFORMATION
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            os.kill(pid, 0)  # signal 0 only probes for existence
+            return True
+        except (OSError, ProcessLookupError, AttributeError):
+            return False
+
+    @classmethod
+    def _clear_stale_lock(cls, lock_file_path):
+        """
+        Remove a lock file if it is owned by a process that no longer exists.
+
+        :param lock_file_path: Path to the candidate lock file.
+        """
+        if not os.path.exists(lock_file_path):
+            return
+        try:
+            with open(lock_file_path, 'r') as f:
+                pid_str = f.read().strip()
+            if pid_str.isdigit() and not cls._check_process_exists(int(pid_str)):
+                logger.debug(f"Removing stale lock file {lock_file_path}")
+                os.remove(lock_file_path)
+        except Exception as e:
+            logger.debug(f"Error inspecting lock file {lock_file_path}: {e}")
+
+    @classmethod
+    def acquire(cls, port):
+        """
+        Acquire a non-blocking cross-process file lock for a serial port.
+
+        Stale lock files left behind by dead processes are detected and removed.
+        On platforms without file-locking support this degrades to success.
+
+        :param port: Serial port name.
+
+        :returns: True if the lock was acquired (or locking is unsupported), else False.
+        """
+        if port in cls._locks:
+            return True
+
+        safe_port_name = port.replace('/', '_').replace('\\', '_').replace(':', '_')
+        lock_file_path = os.path.join(cls._get_lock_dir(), f'{safe_port_name}.lock')
+
+        if not HAS_FCNTL and not HAS_MSVCRT:
+            logger.warning("File locking is unsupported on this platform; "
+                           "falling back to a process-local check only.")
+            return True
+
+        for attempt in (0, 1):
+            # On the second attempt the lock file has just been cleared as stale.
+            try:
+                lock_file = open(lock_file_path, 'a+')
+                try:
+                    if HAS_FCNTL:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        lock_file.seek(0)
+                        if os.path.getsize(lock_file_path) == 0:
+                            lock_file.write('0')
+                            lock_file.flush()
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                except (IOError, OSError):
+                    lock_file.close()
+                    if attempt == 0:
+                        cls._clear_stale_lock(lock_file_path)
+                        continue
+                    logger.warning(f"Port {port} is locked by another process")
+                    return False
+
+                cls._locks[port] = lock_file
+                lock_file.seek(0)
+                lock_file.truncate()
+                lock_file.write(str(os.getpid()))
+                lock_file.flush()
+                logger.debug(f"Acquired file lock for port {port}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to acquire lock for port {port}: {e}")
+                return False
+        return False
+
+    @classmethod
+    def release(cls, port):
+        """
+        Release the cross-process file lock held for a serial port.
+
+        :param port: Serial port name.
+        """
+        lock_file = cls._locks.pop(port, None)
+        if lock_file is None:
+            return
+        try:
+            if HAS_FCNTL:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif HAS_MSVCRT:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_file.close()
+            logger.debug(f"Released file lock for port {port}")
+        except Exception as e:
+            logger.error(f"Failed to release lock for port {port}: {e}")
+
+
+class SmartUSBHub:
+    """
+    High-level interface to an industrial Smart USB Hub over UART.
+
+    Provides per-port control of power and data connections, voltage/current
+    monitoring, default-state configuration and factory reset. Suitable for
+    automated test systems and hardware development.
+
+    Instances may be used as context managers; the device is disconnected on exit:
+
+    .. code-block:: python
+
+       with SmartUSBHub(port) as hub:
+       hub.set_channel_power(1, state=1)
+    """
+
+    # Process-local registry of open ports and their device addresses. Used to
+    # detect double-open within a process; the cross-process file lock lives in
+    # ``_PortLock``.
+    _connected_ports = set()
+    _connected_addresses = {}        # {port: address}
+    _instances = weakref.WeakSet()   # live instances, for atexit cleanup
+
+    @classmethod
+    def _acquire_port_lock(cls, port):
+        """Acquire the cross-process lock for ``port``. See ``_PortLock.acquire``."""
+        return _PortLock.acquire(port)
+
+    @classmethod
+    def _release_port_lock(cls, port):
+        """Release the cross-process lock for ``port``. See ``_PortLock.release``."""
+        return _PortLock.release(port)
+
+    @classmethod
+    def _cleanup_all_instances(cls):
+        """Disconnect every live instance. Registered with atexit for safe shutdown."""
+        for instance in list(cls._instances):
+            try:
+                instance.disconnect()
+            except Exception:
+                pass
+
+    # Commands that the device acknowledges and that the host may wait on.
+    _ACK_COMMANDS = (
+        CMD_GET_OPERATE_MODE, CMD_SET_OPERATE_MODE,
+        CMD_SET_CHANNEL_POWER, CMD_GET_CHANNEL_POWER_STATUS,
+        CMD_SET_CHANNEL_POWER_INTERLOCK,
+        CMD_GET_CHANNEL_VOLTAGE, CMD_GET_CHANNEL_CURRENT,
+        CMD_GET_CHANNEL_MEASUREMENTS,
+        CMD_GET_CHANNEL_OC_STATUS, CMD_CLEAR_CHANNEL_OC_LATCH,
+        CMD_IDENTIFY_DEVICE,
+        CMD_SET_CHANNEL_NAME, CMD_GET_CHANNEL_NAME,
+        CMD_SET_DEVICE_ALIAS, CMD_GET_DEVICE_ALIAS,
+        CMD_SET_CHANNEL_DATALINE, CMD_GET_CHANNEL_DATALINE_STATUS,
+        CMD_SET_BUTTON_CONTROL, CMD_GET_BUTTON_CONTROL_STATUS,
+        CMD_SET_DEFAULT_POWER_STATUS, CMD_GET_DEFAULT_POWER_STATUS,
+        CMD_SET_DEFAULT_DATALINE_STATUS, CMD_GET_DEFAULT_DATALINE_STATUS,
+        CMD_SET_AUTO_RESTORE, CMD_GET_AUTO_RESTORE_STATUS,
+        CMD_SET_DEVICE_ADDRESS, CMD_GET_DEVICE_ADDRESS,
+        CMD_REBOOT_MCU, CMD_GET_PRODUCT_TYPE, CMD_GET_MAX_CHANNELS,
+        CMD_GET_SERIAL_NO, CMD_FACTORY_RESET,
+        CMD_GET_FIRMWARE_VERSION, CMD_GET_HARDWARE_VERSION,
+    )
+
+    # Wire framing tables live on the codec; alias here so the receive loop's
+    # frame-sizing (``self._V2_REPLY_COMMANDS``) reads the same single source.
+    _V2_REPLY_COMMANDS = _Codec.V2_REPLY_COMMANDS
+
+    def __init__(self, port):
+        """
+        Open a Smart USB Hub on the given serial port and read its identity.
+
+        Acquires a process-local and cross-process lock on the port, opens the
+        serial link at 115200 baud, starts the background receive thread and
+        queries device information. The constructor blocks until the device
+        identity is read or the attempt times out.
+
+        :param port: Serial port name (e.g. "/dev/ttyUSB0" or "COM3").
+
+        :raises PortBusyError: If the port is already in use by another instance or process.
+
+        :raises DeviceConnectionError: If the device does not respond during setup.
+
+        :raises serial.SerialException: For other serial-layer failures.
+        """
+        self.port = port
+        self.name = f"smarthub_id:{port.split('/')[-1]}"
+
+        if port in SmartUSBHub._connected_ports:
+            raise PortBusyError(
+                f"Port {port} is already in use by another SmartUSBHub instance. "
+                f"Disconnect the existing instance first or use a different port.")
+
+        if not self._acquire_port_lock(port):
+            raise PortBusyError(
+                f"Port {port} is already in use by another process. "
+                f"Disconnect the existing connection first or use a different port.")
+
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0.5)
+            SmartUSBHub._connected_ports.add(port)
+            SmartUSBHub._instances.add(self)
+        except serial.SerialException as e:
+            self._release_port_lock(port)
+            msg = str(e).lower()
+            if "could not open port" in msg or "access is denied" in msg:
+                raise PortBusyError(
+                    f"Port {port} is already in use. Disconnect the existing connection first.")
+            raise
+
+        # Default ACK timeout; refined per product model once the type is known.
+        self.com_timeout = 0.1
+        logger.info(f"SmartUSBHub initialized on port {self.port}")
+
+        # One ACK Event per command; the receive thread sets it when a matching
+        # frame arrives and the calling thread waits on it.
+        self.ack_events = {cmd: threading.Event() for cmd in self._ACK_COMMANDS}
+        self.callbacks = {cmd: None for cmd in self.ack_events}
+
+        # Maps an incoming command code to the handler that updates cached state.
+        self._frame_handlers = {
+            CMD_SET_CHANNEL_POWER: self._handle_set_channel_power_status,
+            CMD_GET_CHANNEL_POWER_STATUS: self._handle_get_channel_power_status,
+            CMD_SET_CHANNEL_POWER_INTERLOCK: self._handle_power_interlock_control,
+            CMD_GET_CHANNEL_OC_STATUS: self._handle_oc_status,
+            CMD_CLEAR_CHANNEL_OC_LATCH: self._handle_oc_status,
+            CMD_GET_CHANNEL_VOLTAGE: self._handle_get_channel_voltage,
+            CMD_GET_CHANNEL_CURRENT: self._handle_get_channel_current,
+            CMD_GET_CHANNEL_MEASUREMENTS: self._handle_get_channel_measurements,
+            CMD_SET_CHANNEL_DATALINE: self._handle_set_channel_dataline,
+            CMD_IDENTIFY_DEVICE: self._handle_identify_device,
+            CMD_SET_CHANNEL_NAME: self._handle_channel_name,
+            CMD_GET_CHANNEL_NAME: self._handle_channel_name,
+            CMD_SET_DEVICE_ALIAS: self._handle_device_alias,
+            CMD_GET_DEVICE_ALIAS: self._handle_device_alias,
+            CMD_GET_CHANNEL_DATALINE_STATUS: self._handle_get_channel_dataline,
+            CMD_SET_BUTTON_CONTROL: self._handle_set_button_control,
+            CMD_GET_BUTTON_CONTROL_STATUS: self._handle_get_button_control,
+            CMD_SET_DEFAULT_POWER_STATUS: self._handle_set_default_power_status,
+            CMD_GET_DEFAULT_POWER_STATUS: self._handle_get_default_power_status,
+            CMD_SET_DEFAULT_DATALINE_STATUS: self._handle_set_default_dataline_status,
+            CMD_GET_DEFAULT_DATALINE_STATUS: self._handle_get_default_dataline_status,
+            CMD_SET_AUTO_RESTORE: self._handle_set_auto_restore,
+            CMD_GET_AUTO_RESTORE_STATUS: self._handle_get_auto_restore_status,
+            CMD_GET_OPERATE_MODE: self._handle_get_operate_mode,
+            CMD_SET_OPERATE_MODE: self._handle_set_operate_mode,
+            CMD_SET_DEVICE_ADDRESS: self._handle_set_device_address,
+            CMD_GET_DEVICE_ADDRESS: self._handle_get_device_address,
+            CMD_REBOOT_MCU: self._handle_reboot_mcu,
+            CMD_FACTORY_RESET: self._handle_factory_reset,
+            CMD_GET_FIRMWARE_VERSION: self._handle_firmware_version,
+            CMD_GET_HARDWARE_VERSION: self._handle_hardware_version,
+            CMD_GET_PRODUCT_TYPE: self._handle_product_type,
+            CMD_GET_MAX_CHANNELS: self._handle_get_max_channels,
+            CMD_GET_SERIAL_NO: self._handle_serial_no,
+        }
+
+        self.lock = threading.Lock()        # serializes @synchronized methods
+        self._send_lock = threading.Lock()  # serializes raw serial writes
+
+        # Command pacing. These defaults were tuned on hardware to sit just above
+        # the physical USB-CDC + MCU round-trip floor (~2.5 ms/command): a 10000-
+        # command sustained run held 100% with these values. Raise them only if a
+        # flakier link (long cable / passive hub) drops ACKs; lowering further
+        # yields nothing (the device is already the limit) and rx poll must stay
+        # >0 so the receive thread does not busy-spin a CPU core.
+        self._last_send_time = 0
+        self._min_send_interval = 0.001   # >= 1 ms between writes (burst guard)
+        self._mcu_response_wait = 0.000   # no settle; the reply is awaited explicitly
+        # How often the receive thread polls the serial port for reply bytes.
+        # Bounds reply-detection latency; lowering it makes commands feel snappier
+        # at the cost of more CPU wakeups (no effect on the MCU).
+        self._rx_poll_interval = 0.001
+
+        self.disconnect_callback = None
+
+        # Cached device identity / configuration.
+        self.hardware_version = None
+        self.firmware_version = None
+        self.firmware_version_major = None
+        self.firmware_version_minor = None
+        self.product_type = None
+        self.max_channels = None
+        self.serial_no = None
+        self.operate_mode = None
+        self.auto_restore_status = None
+        self.button_control_status = None
+        self.device_address = None
+        self.device_alias = ""
+
+        # Cached per-channel state, keyed by 1-based channel number.
+        self.channel_default_power_flag = {}
+        self.channel_default_power_status = {}
+        self.channel_names = {}
+        self.channel_default_dataline_flag = {}
+        self.channel_default_dataline_status = {}
+        self.channel_power_status = {}
+        self.channel_dataline_status = {}
+        self.channel_oc_active = {}   # {ch: bool} current FLAG# state
+        self.channel_oc_latch = {}    # {ch: bool} sticky latch, cleared by command
+        self.channel_voltages = {}
+        self.channel_currents = {}
+        self.channel_measurement_fresh = {}
+        self.channel_measurement_valid = {}
+        self.channel_measurement_sample_tick = {}
+
+        # Signalled by the receive thread after every dispatched frame, so a
+        # caller can wait for content-based completion (e.g. a multi-channel read
+        # collecting one reply frame per channel) instead of a fixed settle delay.
+        self._frame_condition = threading.Condition()
+
+        # V3 measurement-stream bookkeeping.
+        self._measurement_stream_condition = threading.Condition()
+        self._measurement_stream_seq = 0
+        self._measurement_stream_tick = None
+        self._measurement_stream_period_ms = None
+        self._last_v3_status = {}
+
+        # Consecutive ACK failures before an MCU recovery is attempted.
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5
+
+        try:
+            self._start()
+            # Allow the MCU state machine to settle if it was previously stuck
+            # (stuck detection is 100 ms, timeout detection 20 ms).
+            time.sleep(0.15)
+            self.get_device_info()
+
+            if self.operate_mode is None:
+                logger.error("Failed to read operate mode; device is not responding.")
+                raise DeviceConnectionError(
+                    f"Device on port {self.port} did not respond to the operate-mode query. "
+                    f"The port may not be a SmartUSBHub, or the device is unresponsive.")
+
+            if self.device_address is not None:
+                SmartUSBHub._connected_addresses[port] = self.device_address
+
+            logger.info(f"Hardware version: V1.{self.hardware_version}")
+            logger.info(f"Firmware version: {self.get_firmware_version_string()}")
+            logger.info(f"Operate mode: {'normal' if self.operate_mode == 0 else 'interlock'}")
+            logger.info(f"Button control: {'enabled' if self.button_control_status == 1 else 'disabled'}")
+        except Exception:
+            self.disconnect()
+            raise
+
+    def __enter__(self):
+        """
+        Enter the runtime context and return this instance.
+
+        :returns: self
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Exit the runtime context, disconnecting the device.
+
+        :returns: False (exceptions are never suppressed).
+        """
+        self.disconnect()
+        return False
+
+    def close(self):
+        """Close the connection. Alias for ``disconnect.``"""
+        self.disconnect()
+
+    def register_disconnect_callback(self, callback):
+        """
+        Register a callback invoked when the device disconnects unexpectedly.
+
+        :param callback: Zero-argument callable executed on disconnect.
+        """
+        self.disconnect_callback = callback
+
+    def register_callback(self, cmd, callback):
+        """
+        Register a callback invoked when a command's ACK is received.
+
+        :param cmd: Command code to attach the callback to.
+
+        :param callback: Callable receiving (channel, value) when the ACK arrives.
+        """
+        if cmd in self.callbacks:
+            self.callbacks[cmd] = callback
+            logger.info(f"Callback registered for command {cmd:#04x}")
         else:
-            value = data[4]
-            checksum = data[5]
-            if ((cmd + channel + value) & 0xFF) != checksum:
-                return None
-            return (cmd, channel, value, 6)
+            logger.warning(f"Invalid command {cmd:#04x}; cannot register callback.")
+
+    def _invoke_callback(self, cmd, *args, **kwargs):
+        """
+        Invoke the user callback registered for a command, if any.
+
+        :param cmd: Command code whose callback should run.
+
+        :param args: Positional arguments forwarded to the callback.
+
+        :param kwargs: Keyword arguments forwarded to the callback.
+        """
+        callback = self.callbacks.get(cmd)
+        if callback:
+            try:
+                callback(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in callback for command {cmd:#04x}: {e}")
+
+    @staticmethod
+    def get_product_info(product_type_id):
+        """
+        Look up the capability record for a product-type ID.
+
+        :param product_type_id: Product-type ID (see ``PRODUCT_TYPE_TABLE``).
+
+        :returns: The product-info dict, or None if the ID is unknown.
+        """
+        return PRODUCT_TYPE_TABLE.get(product_type_id)
+
+    def _check_feature_support(self, feature_name):
+        """
+        Report whether the connected device has a named hardware capability.
+
+        :param feature_name: One of "adc", "usb2_data_switch", "usb3_data_switch", "ilim_switch".
+
+        :returns: True if the hardware capability is present, False otherwise.
+
+        :raises FeatureNotSupportedError: If the product type or feature name is unknown.
+        """
+        if self.product_type is None:
+            self.product_type = self.get_product_type()
+        if self.product_type is None:
+            raise FeatureNotSupportedError("Product type is unknown; cannot check feature support.")
+
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        if product_info is None:
+            raise FeatureNotSupportedError(f"Unknown product type: {self.product_type:#02x}")
+
+        feature_map = {
+            "adc": "enable_adc",
+            "usb2_data_switch": "enable_usb2_data_switch",
+            "usb3_data_switch": "enable_usb3_data_switch",
+            "ilim_switch": "enable_ilim_switch",
+        }
+        if feature_name not in feature_map:
+            raise FeatureNotSupportedError(
+                f"Unknown feature name: {feature_name}. Valid features: {list(feature_map)}")
+        return product_info.get(feature_map[feature_name], False)
+
+    @classmethod
+    def scan_available_ports(cls):
+        """
+        Scan for serial ports whose USB VID/PID match a Smart USB Hub.
+
+        :returns: List of matching port device names.
+        """
+        return [p.device for p in serial.tools.list_ports.comports()
+                if p.vid == 0x1A86 and p.pid == 0xfe0c]
+
+    @classmethod
+    def scan_and_connect(cls, exclude_ports=None, device_address=None):
+        """
+        Scan for Smart USB Hub devices and connect to the first valid one.
+
+        :param exclude_ports: Set of ports to skip; defaults to ports already connected.
+
+        :param device_address: If given, only connect to a device reporting this address. Note: addresses default to 0, so multiple devices may share one; prefer selecting by port. See ``scan_and_connect_by_address.``
+
+        :returns: A connected SmartUSBHub instance, or None if none was found.
+        """
+        if exclude_ports is None:
+            exclude_ports = cls._connected_ports.copy()
+
+        for port_info in serial.tools.list_ports.comports():
+            port_name = port_info.device
+            if port_name in exclude_ports:
+                logger.debug(f"Skipping already connected port {port_name}")
+                continue
+            if port_info.vid != 0x1A86 or port_info.pid != 0xfe0c:
+                continue
+
+            logger.debug(f"Trying to connect to port {port_name}")
+            try:
+                hub = cls(port_name)
+                if device_address is not None and hub.device_address != device_address:
+                    logger.debug(f"Address mismatch on {port_name}: "
+                                 f"expected {device_address:#04x}, got {hub.device_address:#04x}")
+                    hub.disconnect()
+                    continue
+                if device_address is not None:
+                    logger.info(f"Found device with address {device_address:#04x} on port {port_name}")
+                return hub
+            except (SmartUSBHubError, serial.SerialException) as e:
+                logger.warning(f"Failed to connect to {port_name}: {e}")
+                continue
+
+        if device_address is not None:
+            logger.warning(f"No Smart USB Hub found with address {device_address:#04x}, "
+                           f"or all devices are already connected.")
+        else:
+            logger.warning("No Smart USB Hub found, or all devices are already connected.")
+        return None
+
+    @classmethod
+    def scan_and_connect_by_address(cls, device_address):
+        """
+        Connect to a Smart USB Hub by device address.
+
+        .. warning::
+
+           Addresses default to 0, so multiple devices may share one address, making this selection unreliable. Prefer ``scan_and_connect`` by port, or assign distinct addresses first.
+
+        :param device_address: Device address to match (0x0000 - 0xFFFF).
+
+        :returns: A connected SmartUSBHub instance, or None if no match was found.
+        """
+        return cls.scan_and_connect(device_address=device_address)
+
+    @classmethod
+    def auto_connect(cls, exclude_ports=None, feature_filter=None):
+        """
+        Scan and connect to the first available device, skipping busy ones.
+
+        Unlike ``scan_and_connect``, a busy or failing port is skipped and the next
+        candidate is tried automatically.
+
+        :param exclude_ports: Set of ports to skip; defaults to ports already connected.
+
+        :param feature_filter: If given, only connect to a device supporting this feature (see ``_check_feature_support`` for valid names).
+
+        :returns: A connected SmartUSBHub instance, or None if none is available.
+        """
+        if exclude_ports is None:
+            exclude_ports = cls._connected_ports.copy()
+
+        ports = cls.scan_available_ports()
+        if not ports:
+            logger.warning("No Smart USB Hub devices found")
+            return None
+
+        logger.info(f"Found {len(ports)} device(s): {ports}")
+        for port in ports:
+            if port in exclude_ports:
+                logger.debug(f"Skipping already connected port {port}")
+                continue
+
+            logger.info(f"Trying to connect to {port}...")
+            try:
+                hub = cls(port)
+            except PortBusyError:
+                logger.info(f"Port {port} is already in use, trying next device...")
+                continue
+            except (SmartUSBHubError, serial.SerialException) as e:
+                logger.warning(f"Failed to connect to {port}: {e}, trying next device...")
+                continue
+
+            logger.info(f"Successfully connected to {port}")
+            if feature_filter is not None and not hub._check_feature_support(feature_filter):
+                logger.info(f"Device on {port} does not support '{feature_filter}', trying next device...")
+                hub.disconnect()
+                continue
+            return hub
+
+        logger.warning("All devices are unavailable (occupied or connection failed)")
+        return None
+
+    def _start(self):
+        """
+        Start the background UART receive thread.
+
+        The thread is a daemon so it never blocks interpreter shutdown; cleanup is
+        handled by ``disconnect`` and the atexit hook. Unlike earlier versions
+        this no longer installs a process-wide SIGINT handler, which made the
+        library unsafe to construct off the main thread or alongside other code.
+        """
+        self.stop_event = threading.Event()
+        self.uart_recv_thread = threading.Thread(
+            target=self._uart_recv_task, name=f"{self.name}-rx", daemon=True)
+        self.uart_recv_thread.start()
+
+    def disconnect(self):
+        """
+        Disconnect from the device and stop the receive thread.
+
+        Idempotent and safe to call multiple times (e.g. via context-manager exit
+        and atexit). Releases the port's process-local and cross-process locks.
+        """
+        stop_event = getattr(self, 'stop_event', None)
+        if stop_event is not None:
+            stop_event.set()
+
+        thread = getattr(self, 'uart_recv_thread', None)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)
+
+        ser = getattr(self, 'ser', None)
+        if ser is not None and ser.is_open:
+            try:
+                ser.flush()
+                ser.close()
+            except Exception:
+                pass
+
+        SmartUSBHub._connected_ports.discard(self.port)
+        SmartUSBHub._connected_addresses.pop(self.port, None)
+        SmartUSBHub._instances.discard(self)
+        self._release_port_lock(self.port)
+
+    def is_connected(self):
+        """
+        Report whether the serial port is currently open.
+
+        :returns: True if connected, False otherwise.
+        """
+        ser = getattr(self, 'ser', None)
+        return bool(ser and ser.is_open)
+
+    def _cal_crc16(self, data):
+        """Compute a CRC16 (poly 0x8005, init 0xFFFF). See ``_Codec.crc16``."""
+        return _Codec.crc16(data)
+
+    def _parse_protocol_frame(self, data):
+        """
+        Parse one frame from the front of a received byte buffer (V1/V2/V3).
+
+        Thin wrapper over ``_Codec.parse_frame``; see there for the frame layouts
+        and the return shape.
+        """
+        return _Codec.parse_frame(data)
 
     def _uart_recv_task(self):
         """
-        Continuously reads from the UART and processes incoming data frames.
+        Background loop that reads the UART and dispatches complete frames.
+
+        Runs until ``stop_event`` is set or the serial link fails. On an unexpected
+        disconnect the registered disconnect callback (if any) is invoked.
         """
         buffer = bytearray()
         while not self.stop_event.is_set():
@@ -553,781 +1121,1703 @@ class SmartUSBHub:
                 if self.ser is not None and self.ser.in_waiting > 0:
                     buffer.extend(self.ser.read(self.ser.in_waiting))
                     logger.debug(f"rx data: {buffer.hex()}")
-                    while len(buffer) >= 6:
+
+                    # Drain as many complete frames as the buffer holds. min_size
+                    # is recomputed each pass so a V1 frame is not skipped after a
+                    # V3 frame is consumed.
+                    while True:
+                        if len(buffer) < 2:
+                            break
+                        is_v3 = (buffer[0] == 0x55 and buffer[1] == 0xAB)
+                        if is_v3:
+                            # Validate the complete V3 magic before trusting the
+                            # declared payload length. Otherwise a corrupt
+                            # ``55 AB`` prefix with a plausible length can hold
+                            # subsequent valid frames in the buffer indefinitely.
+                            if len(buffer) < len(V3_MAGIC):
+                                break
+                            if tuple(buffer[:len(V3_MAGIC)]) != V3_MAGIC:
+                                logger.debug(
+                                    f"Discarding invalid V3 magic: "
+                                    f"{buffer[:len(V3_MAGIC)].hex()}")
+                                buffer.pop(0)
+                                continue
+                            if len(buffer) < V3_HEADER_LEN:
+                                break
+                        elif len(buffer) < 6:
+                            break
+
+                        if is_v3:
+                            data_length = buffer[6] | (buffer[7] << 8)
+                            if data_length > V3_MAX_DATA_LEN:
+                                logger.debug(
+                                    f"Discarding invalid V3 payload length: "
+                                    f"{data_length} > {V3_MAX_DATA_LEN}")
+                                buffer.pop(0)
+                                continue
+                            if len(buffer) < V3_HEADER_LEN + data_length:
+                                break
+                        elif buffer[0] == 0x55 and buffer[1] == 0x5A:
+                            if buffer[2] in self._V2_REPLY_COMMANDS and len(buffer) < 7:
+                                break
+
                         result = self._parse_protocol_frame(buffer)
-                        if result is not None:
-                            cmd, channel, value, length = result
-
-                            logger.debug(f"Parsed CMD: {cmd:#04x}, Channel: {channel:#04x}, Value: {value}")
-
-                            if cmd == CMD_SET_CHANNEL_POWER:
-                                self._handle_set_channel_power_status()
-                            if cmd == CMD_GET_CHANNEL_POWER_STATUS:
-                                self._handle_get_channel_power_status(channel, value)
-                            if cmd == CMD_SET_CHANNEL_POWER_INTERLOCK:
-                                self._handle_power_interlock_control()
-                            elif cmd == CMD_GET_CHANNEL_VOLTAGE:
-                                self._handle_get_channel_voltage(channel, value)
-                            elif cmd == CMD_GET_CHANNEL_CURRENT:
-                                self._handle_get_channel_current(channel, value)
-                            elif cmd == CMD_SET_CHANNEL_DATALINE:
-                                self._handle_set_channel_dataline(channel, value)
-                            elif cmd == CMD_GET_CHANNEL_DATALINE_STATUS:
-                                self._handle_get_channel_dataline(channel, value)
-                            elif cmd == CMD_SET_BUTTON_CONTROL:
-                                self._handle_set_button_control()
-                            elif cmd == CMD_GET_BUTTON_CONTROL_STATUS:
-                                self._handle_get_button_control(value)
-                            elif cmd == CMD_SET_DEFAULT_POWER_STATUS:
-                                self._handle_set_default_power_status(channel,value)
-                            elif cmd == CMD_GET_DEFAULT_POWER_STATUS:
-                                self._handle_get_default_power_status(channel,value)
-                            elif cmd == CMD_SET_DEFAULT_DATALINE_STATUS:
-                                self._handle_set_default_dataline_status(channel,value)
-                            elif cmd == CMD_GET_DEFAULT_DATALINE_STATUS:
-                                self._handle_get_default_dataline_status(channel,value)
-                            elif cmd == CMD_SET_AUTO_RESTORE:
-                                self._handle_set_auto_restore()
-                            elif cmd == CMD_GET_AUTO_RESTORE_STATUS:
-                                self._handle_get_auto_restore_status(value)
-                            elif cmd == CMD_GET_OPERATE_MODE:
-                                self._handle_get_operate_mode(value)
-                            elif cmd == CMD_SET_OPERATE_MODE:
-                                self._handle_set_operate_mode()
-                            elif cmd == CMD_SET_DEVICE_ADDRESS:
-                                self._handle_set_device_address()
-                            elif cmd == CMD_GET_DEVICE_ADDRESS:
-                                self._handle_get_device_address(channel,value)#msb lsb
-                            elif cmd == CMD_FACTORY_RESET:
-                                self._handle_factory_reset()
-                            elif cmd == CMD_GET_FIRMWARE_VERSION:
-                                self._handle_firmware_version(value)
-                            elif cmd == CMD_GET_HARDWARE_VERSION:
-                                self._handle_hardware_version(value)
-                            if cmd in self.ack_events:
-                                self._invoke_callback(cmd,channel,value)
-                                self.ack_events[cmd].set()
-
-                            del buffer[:length]
-                        else:
+                        if result is None:
                             buffer.pop(0)
-            except (OSError, AttributeError,serial.SerialException) as e:
-                logger.error(f"Error reading from UART: {e}")
+                            continue
+
+                        cmd, channel, value, length = result
+                        logger.debug(f"Parsed cmd={cmd:#04x}, channel={channel:#04x}, "
+                                     f"value={value}, raw={buffer[:length].hex()}")
+
+                        self._dispatch_frame(cmd, channel, value)
+
+                        del buffer[:length]
+            except (OSError, AttributeError, serial.SerialException) as e:
+                # errno 6 (ENXIO) and an already-set stop_event indicate an
+                # expected disconnect (device reboot or explicit disconnect()).
+                is_expected = self.stop_event.is_set()
+                if isinstance(e, OSError) and getattr(e, 'errno', None) == 6:
+                    is_expected = True
+
+                if is_expected:
+                    logger.debug(f"UART disconnected (expected): {e}")
+                else:
+                    logger.error(f"Error reading from UART: {e}")
+
                 self.ser = None
                 if self.disconnect_callback:
                     self.disconnect_callback()
                 self.stop_event.set()
-                logger.error("UART disconnected")
+                if not is_expected:
+                    logger.error("UART disconnected")
                 break
-            time.sleep(0.01)
+            time.sleep(self._rx_poll_interval)
+
+    def _dispatch_frame(self, cmd, channel, value):
+        """
+        Route one decoded frame to its state handler and ACK / wake sinks.
+
+        This is the seam between the transport (read + frame the bytes) and the
+        session (update state, satisfy waiters). Called only from the receive
+        thread, one call per complete frame.
+        """
+        handler = self._frame_handlers.get(cmd)
+        if handler is not None:
+            handler(channel, value)
+
+        # Stream frames are unsolicited notifications and must not satisfy a
+        # pending ACK wait.
+        is_stream_notify = (isinstance(value, dict)
+                            and value.get("v3") and value.get("stream"))
+        if cmd in self.ack_events and not is_stream_notify:
+            self._invoke_callback(cmd, channel, value)
+            self.ack_events[cmd].set()
+
+        # Wake anyone waiting for content-based completion (see
+        # _wait_for_channel_cache); cheap and unconditional.
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+
+    def _wait_for_channel_cache(self, cache, channels, timeout=None):
+        """
+        Block until every channel in ``channels`` is present in ``cache``, or timeout.
+
+        Replaces fixed post-ACK settle delays for multi-frame replies (the device
+        sends one reply frame per channel): the receive thread notifies
+        ``_frame_condition`` after each frame, so this returns the instant the last
+        expected channel lands — deterministic rather than guessing a delay. Callers
+        should drop the stale entries for ``channels`` before sending, so a hit here
+        always reflects this request's fresh frames.
+
+        :param cache: Per-channel state dict the receive thread populates.
+
+        :param channels: Channels that must all be present.
+
+        :param timeout: Max wait in seconds; defaults to ``self.com_timeout.``
+
+        :returns: True if all channels arrived, False on timeout.
+        """
+        if timeout is None:
+            timeout = self.com_timeout
+        deadline = time.monotonic() + timeout
+        with self._frame_condition:
+            while not all(ch in cache for ch in channels):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._frame_condition.wait(remaining)
+        return True
 
     def _convert_channel(self, channel_mask):
         """
-        Converts a channel bitmask into a list of individual channel numbers.
+        Convert a channel bitmask into a list of 1-based channel numbers.
 
-        Args:
-            channel_mask (int): Bitmask representing which channels are included.
+        :param channel_mask: Bitmask (bit0 = channel 1, bit1 = channel 2, ...).
 
-        Returns:
-            list: A list of channel numbers (1, 2, 3, 4).
+        :returns: List of channel numbers present in the mask.
         """
         channels = []
-        if channel_mask & CHANNEL_1:
-            channels.append(1)
-        if channel_mask & CHANNEL_2:
-            channels.append(2)
-        if channel_mask & CHANNEL_3:
-            channels.append(3)
-        if channel_mask & CHANNEL_4:
-            channels.append(4)
+        ch = 1
+        while channel_mask:
+            if channel_mask & 0x01:
+                channels.append(ch)
+            channel_mask >>= 1
+            ch += 1
         return channels
 
     def _send_packet(self, cmd, channels, data=None):
         """
-        Builds and sends a packet to the device.
+        Build and send a V1/V2 packet to the device.
 
-        Args:
-            cmd (int): Command byte.
-            channels (list[int]): List of channel numbers to include in the packet.
-            data (list[int] or None): Extra data bytes to include.
+        Enforces the minimum inter-command interval and post-write settle delay so
+        the MCU is never overrun, even when ``ENABLE_SYNC_LOCK`` is False.
 
-        Returns:
-            bytearray: The packet that was sent to the device.
+        :param cmd: Command byte.
+
+        :param channels: Channel list, or a raw channel-mask int for CMD_SET_DEVICE_ADDRESS.
+
+        :param data: Extra payload byte(s); defaults to a single 0x00 byte.
+
+        :returns: The bytearray that was written.
         """
-        if cmd is CMD_SET_DEVICE_ADDRESS:
+        if cmd == CMD_SET_DEVICE_ADDRESS:
             channel_mask = channels
         elif channels is None:
             channel_mask = 0
         else:
-            # Convert channels to channel mask
-            channel_mask = sum([1 << (ch - 1) for ch in channels])
+            channel_mask = sum(1 << (ch - 1) for ch in channels)
 
-        # Clean and normalize data
         if data is None:
             data = [0x00]
         elif not isinstance(data, list):
             data = [data]
-        
-        # Combine channel mask and data
-        payload = [channel_mask] + data
 
-        # Start with header bytes
-        packet = bytearray([0x55, 0x5A, cmd])
+        packet = _Codec.encode_v1v2(cmd, channel_mask, data)
 
-        # Add data bytes
-        packet.extend(payload)
-
-        # Calculate checksum (cmd + all data bytes) & 0xFF
-        checksum = (cmd + sum(payload)) & 0xFF
-
-        # Add checksum to packet
-        packet.append(checksum)
-
-        # Send the packet
-        if self.ser and self.ser.is_open:
-            self.ser.write(packet)
-
-        logger.debug(f"Sent command: {packet.hex()}")
-
+        with self._send_lock:
+            elapsed = time.time() - self._last_send_time
+            if elapsed < self._min_send_interval:
+                time.sleep(self._min_send_interval - elapsed)
+            if self.ser and self.ser.is_open:
+                self.ser.write(packet)
+            self._last_send_time = time.time()
+            time.sleep(self._mcu_response_wait)
+            logger.debug(f"Sent command: {packet.hex()}")
         return packet
 
-    def _handle_set_operate_mode(self):
-        logger.debug("_handle_set_operate_mode ACK")
+    def _send_v3_packet(self, cmd, payload=b""):
+        """
+        Build and send a V3 packet to the device.
 
-    def _handle_get_operate_mode(self, value):
-        logger.debug("_handle_get_operate_mode ACK")
+        :param cmd: Command byte.
+
+        :param payload: Payload as bytes, bytearray, list of ints, or a single int.
+
+        :returns: The bytearray that was written.
+
+        :raises ValueError: If the payload exceeds ``V3_MAX_DATA_LEN.``
+        """
+        packet = _Codec.encode_v3(cmd, payload)
+
+        with self._send_lock:
+            elapsed = time.time() - self._last_send_time
+            if elapsed < self._min_send_interval:
+                time.sleep(self._min_send_interval - elapsed)
+            if self.ser and self.ser.is_open:
+                self.ser.write(packet)
+            self._last_send_time = time.time()
+            time.sleep(self._mcu_response_wait)
+            logger.debug(f"Sent V3 command: {packet.hex()}")
+        return packet
+
+    def _wait_for_ack_with_recovery(self, cmd, timeout=None):
+        """
+        Wait for a command ACK, triggering MCU recovery after repeated failures.
+
+        The caller must clear ``self.ack_events[cmd]`` immediately before sending
+        the command (the same discipline the get_* methods follow). This wait then
+        consumes exactly that command's ACK and clears the event again on success,
+        so a satisfied ACK can never leak into the next command's wait. Clearing
+        before the send also discards any late ACK left over from a previously
+        timed-out command, so a stale frame cannot produce a false positive.
+
+        :param cmd: Command code to wait on.
+
+        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout.``
+
+        :returns: True if the ACK arrived, False on timeout.
+        """
+        if timeout is None:
+            timeout = self.com_timeout
+
+        ack_event = self.ack_events.get(cmd)
+        if not ack_event:
+            return False
+
+        # The event was cleared before the send, so a set flag means this command's
+        # ACK arrived (possibly between the send and this wait, in which case wait()
+        # returns at once). Clear it again so the next reuse starts clean.
+        if ack_event.wait(timeout):
+            ack_event.clear()
+            self._consecutive_failures = 0
+            return True
+
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            logger.warning(f"Too many consecutive failures ({self._consecutive_failures}); "
+                           f"triggering MCU recovery...")
+            self._trigger_mcu_recovery()
+            self._consecutive_failures = 0
+        return False
+
+    def _trigger_mcu_recovery(self):
+        """Give the MCU state machine time to recover and flush stale input."""
+        logger.debug("Triggering MCU state-machine recovery...")
+        time.sleep(0.15)  # stuck detection is 100 ms, timeout detection 20 ms
+        if self.ser and self.ser.is_open:
+            try:
+                if self.ser.in_waiting > 0:
+                    self.ser.reset_input_buffer()
+                    logger.debug("Cleared input buffer during recovery")
+            except Exception as e:
+                logger.warning(f"Failed to clear input buffer: {e}")
+
+    def _handle_set_operate_mode(self, channel, value):
+        """
+        --- Frame handlers ------------------------------------------------------
+        Each handler updates cached state for an incoming frame. They share the
+        uniform (channel, value) signature required by the dispatch table; the ACK
+        Event and user callback are signalled centrally in _uart_recv_task, so
+        handlers never touch ack_events themselves.
+
+        Handle a set-operate-mode ACK (no state change).
+        """
+        logger.debug("set_operate_mode ACK")
+
+    def _handle_get_operate_mode(self, channel, value):
+        """Cache the operating mode from a get-operate-mode reply."""
         self.operate_mode = value
 
-    def _handle_set_channel_power_status(self):
-        logger.debug("_handle_set_channel_power_status ACK")
-        self.ack_events[CMD_SET_CHANNEL_POWER].set()
+    def _handle_set_channel_power_status(self, channel, value):
+        """Handle a set-channel-power ACK (no state change)."""
+        logger.debug("set_channel_power ACK")
 
     def _handle_get_channel_power_status(self, channel, value):
-        logger.debug("_handle_get_channel_power_status ACK")
-        channels = self._convert_channel(channel)
-        for ch in channels:
+        """Cache per-channel power state from a status reply."""
+        for ch in self._convert_channel(channel):
             self.channel_power_status[ch] = value
-            logger.info(f"CMD_GET_CHANNEL_POWER_STATUS acked: ch{ch} = {value}")
+            logger.debug(f"power status: ch{ch} = {value}")
 
-    def _handle_power_interlock_control(self):
-        logger.debug("_handle_power_interlock_control ACK")
+    def _handle_power_interlock_control(self, channel, value):
+        """Handle a power-interlock ACK (no state change)."""
+        logger.debug("power_interlock ACK")
+
+    def _handle_oc_status(self, channel, value):
+        """
+        Update per-channel overcurrent state from an OC status frame.
+
+        :param channel: Active-OC bitmask (FLAG# currently asserted).
+
+        :param value: Latched-OC bitmask (sticky until cleared).
+        """
+        active_mask, latch_mask = channel, value
+        logger.debug(f"OC status: active=0x{active_mask:02X} latch=0x{latch_mask:02X}")
+        n = self.max_channels if isinstance(self.max_channels, int) and 0 < self.max_channels <= 16 else 7
+        for ch in range(1, n + 1):
+            idx = ch - 1
+            self.channel_oc_active[ch] = bool(active_mask & (1 << idx))
+            self.channel_oc_latch[ch] = bool(latch_mask & (1 << idx))
 
     def _handle_get_channel_voltage(self, channel, value):
-        logger.debug("_handle_get_channel_voltage ACK")
+        """Cache per-channel voltage (mV) from a V2 voltage reply."""
         if isinstance(value, list) and len(value) == 2:
-            value_int = (value[0] << 8) | value[1]
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_voltages[ch] = value_int
-                logger.debug(f"Get Channel Voltage: ch{ch} = {value_int}")
+            mv = (value[0] << 8) | value[1]
+            for ch in self._convert_channel(channel):
+                self.channel_voltages[ch] = mv
+                logger.debug(f"voltage: ch{ch} = {mv} mV")
         else:
             logger.error("Invalid voltage value received")
 
     def _handle_get_channel_current(self, channel, value):
-        logger.debug("_handle_get_channel_current ACK")
+        """Cache per-channel current (mA) from a V2 current reply."""
         if isinstance(value, list) and len(value) == 2:
-            value_int = (value[0] << 8) | value[1]
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_currents[ch] = value_int
-                logger.debug(f"Get Channel Current: ch{ch} = {value_int}")
+            ma = (value[0] << 8) | value[1]
+            for ch in self._convert_channel(channel):
+                self.channel_currents[ch] = ma
+                logger.debug(f"current: ch{ch} = {ma} mA")
         else:
             logger.error("Invalid current value received")
 
-    def _handle_set_channel_dataline(self, channel, value):
-        logger.debug("_handle_set_channel_dataline ACK")
-        channels = self._convert_channel(channel)
+    def _handle_get_channel_measurements(self, channel, value):
+        """Route a measurement frame to the V3 or legacy decoder."""
+        if isinstance(value, dict) and value.get("v3"):
+            self._handle_v3_measurements(value.get("payload", b""))
+        else:
+            self._handle_legacy_measurements(value)
+
+    def _handle_legacy_measurements(self, value):
+        """
+        Decode a legacy (V2-style) batch measurement payload.
+
+        :param value: Raw payload bytes: channel_mask [fresh_mask] then 4 bytes per channel.
+        """
+        if not isinstance(value, (bytes, bytearray)) or len(value) < 1:
+            logger.error("Invalid measurement payload received")
+            return
+
+        channel_mask = value[0]
+        channels = self._convert_channel(channel_mask)
+        old_len = 1 + 4 * len(channels)
+        new_len = 2 + 4 * len(channels)
+        if len(value) >= new_len:
+            fresh_mask, pos = value[1], 2
+        elif len(value) >= old_len:
+            fresh_mask, pos = channel_mask, 1
+        else:
+            logger.error("Truncated measurement payload received")
+            return
+
         for ch in channels:
+            if pos + 4 > len(value):
+                logger.error("Truncated measurement payload received")
+                break
+            self.channel_voltages[ch] = (value[pos] << 8) | value[pos + 1]
+            self.channel_currents[ch] = (value[pos + 2] << 8) | value[pos + 3]
+            self.channel_measurement_fresh[ch] = bool(fresh_mask & (1 << (ch - 1)))
+            logger.debug(f"measurement: ch{ch} = {self.channel_voltages[ch]} mV, "
+                         f"{self.channel_currents[ch]} mA")
+            pos += 4
+
+    def _handle_v3_measurements(self, value):
+        """
+        Decode a V3 batch/stream measurement payload and notify stream waiters.
+
+        :param value: Raw V3 payload bytes.
+        """
+        if not isinstance(value, (bytes, bytearray)):
+            logger.error("Invalid V3 measurement response")
+            return
+
+        payload = bytes(value)
+        self._last_v3_status[CMD_GET_CHANNEL_MEASUREMENTS] = V3_STATUS_OK
+        if len(payload) < 8:
+            logger.error("Invalid V3 measurement payload")
+            return
+
+        channel_mask = payload[0]
+        fresh_mask = payload[1]
+        valid_mask = payload[2]
+        sample_period_ms = payload[3]
+        sample_tick = (payload[4] | (payload[5] << 8)
+                       | (payload[6] << 16) | (payload[7] << 24))
+        pos = 8
+        updated = []
+        with self._measurement_stream_condition:
+            for ch in self._convert_channel(channel_mask):
+                if pos + 4 > len(payload):
+                    logger.error("Truncated V3 measurement payload")
+                    break
+                self.channel_voltages[ch] = payload[pos] | (payload[pos + 1] << 8)
+                self.channel_currents[ch] = payload[pos + 2] | (payload[pos + 3] << 8)
+                self.channel_measurement_fresh[ch] = bool(fresh_mask & (1 << (ch - 1)))
+                self.channel_measurement_valid[ch] = bool(valid_mask & (1 << (ch - 1)))
+                self.channel_measurement_sample_tick[ch] = sample_tick
+                updated.append(ch)
+                logger.debug(f"V3 measurement: ch{ch} = {self.channel_voltages[ch]} mV, "
+                             f"{self.channel_currents[ch]} mA, period={sample_period_ms} ms, "
+                             f"tick={sample_tick}")
+                pos += 4
+
+            if updated:
+                self._measurement_stream_tick = sample_tick
+                self._measurement_stream_period_ms = sample_period_ms
+                self._measurement_stream_seq += 1
+                self._measurement_stream_condition.notify_all()
+
+    def _handle_set_channel_dataline(self, channel, value):
+        """Cache per-channel USB2 data-line state from a set ACK."""
+        for ch in self._convert_channel(channel):
             self.channel_dataline_status[ch] = value
-            logger.debug(f"Set Channel Dataline: ch{ch} = {value}")
 
     def _handle_get_channel_dataline(self, channel, value):
-        logger.debug("_handle_get_channel_dataline ACK")
-        channels = self._convert_channel(channel)
-        for ch in channels:
+        """Cache per-channel USB2 data-line state from a status reply."""
+        for ch in self._convert_channel(channel):
             self.channel_dataline_status[ch] = value
-            logger.debug(f"Get Channel Dataline: ch{ch} = {value}")
 
-    def _handle_get_button_control(self, value):
-        logger.debug("_handle_get_button_control ACK")
+    def _handle_get_button_control(self, channel, value):
+        """Cache button-control state from a status reply."""
         self.button_control_status = value
 
-    def _handle_set_button_control(self):
-        logger.debug("_handle_set_button_control ACK")
+    def _handle_set_button_control(self, channel, value):
+        """Handle a set-button-control ACK (no state change)."""
+        logger.debug("set_button_control ACK")
 
-    def _handle_set_default_power_status(self,channel,value):
-        logger.debug("_handle_set_default_power_status ACK")
+    def _store_default_status(self, channel, value, flag_dict, status_dict, label):
+        """
+        Cache default power flag/value for the channels in a frame.
+
+        :param flag_dict: Destination dict for the enable flags.
+
+        :param status_dict: Destination dict for the default values.
+
+        :param label: Human-readable label for logging.
+        """
         if isinstance(value, list) and len(value) == 2:
             enable, status = value
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_default_power_flag[ch] = enable
-                self.channel_default_power_status[ch] = status
-                logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default power status, value: {'on' if status else 'off'}")
+            for ch in self._convert_channel(channel):
+                flag_dict[ch] = enable
+                status_dict[ch] = status
+                logger.debug(f"channel {ch} {'enable' if enable else 'disable'} default {label}, "
+                             f"value: {'on' if status else 'off'}")
         else:
-            logger.error("Invalid data for _handle_set_default_power_status")
-    
-    def _handle_get_default_power_status(self,channel,value):
-        logger.debug("_handle_get_default_power_status ACK")
-        if isinstance(value, list) and len(value) == 2:
-            enable, status = value
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_default_power_flag[ch] = enable
-                self.channel_default_power_status[ch] = status
-                logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default power status, value: {'on' if status else 'off'}")
-        else:
-            logger.error("Invalid data for _handle_set_default_power_status")
+            logger.error(f"Invalid data for default {label} handler")
 
-    def _handle_set_default_dataline_status(self,channel,value):
-        logger.debug("_handle_set_default_dataline_status ACK")
-        if isinstance(value, list) and len(value) == 2:
-            enable, status = value
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_default_dataline_flag[ch] = enable
-                self.channel_default_dataline_status[ch] = status
-                logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default dataline status, value: {'on' if status else 'off'}")
-        else:
-            logger.error("Invalid data for _handle_set_default_dataline_status")
-    
-    def _handle_get_default_dataline_status(self,channel,value):
-        logger.debug("_handle_get_default_dataline_status ACK")
-        if isinstance(value, list) and len(value) == 2:
-            enable, status = value
-            channels = self._convert_channel(channel)
-            for ch in channels:
-                self.channel_default_dataline_flag[ch] = enable
-                self.channel_default_dataline_status[ch] = status
-                logger.debug(f"Channel {ch} {'enable' if enable else 'disable'} default dataline status, value: {'on' if status else 'off'}")
-        else:
-            logger.error("Invalid data for _handle_get_default_dataline_status")
+    def _handle_set_default_power_status(self, channel, value):
+        """Cache default power status from a set ACK."""
+        self._store_default_status(channel, value, self.channel_default_power_flag,
+                                   self.channel_default_power_status, "power status")
 
-    def _handle_set_device_address(self):
-        logger.debug("_handle_set_device_address ACK")
-    def _handle_get_device_address(self, msb,lsb):
-        logger.debug("_handle_get_device_address ACK")
-        self.device_address = (msb << 8) | lsb
-        logger.debug(f"set device address: {self.device_address}")
-    def _handle_factory_reset(self):
-        logger.debug("_handle_factory_reset ACK")
+    def _handle_get_default_power_status(self, channel, value):
+        """Cache default power status from a get reply."""
+        self._store_default_status(channel, value, self.channel_default_power_flag,
+                                   self.channel_default_power_status, "power status")
 
-    def _handle_firmware_version(self, value):
-        logger.debug("_handle_firmware_version ACK")
+    def _handle_set_default_dataline_status(self, channel, value):
+        """Cache default data-line status from a set ACK."""
+        self._store_default_status(channel, value, self.channel_default_dataline_flag,
+                                   self.channel_default_dataline_status, "dataline status")
+
+    def _handle_get_default_dataline_status(self, channel, value):
+        """Cache default data-line status from a get reply."""
+        self._store_default_status(channel, value, self.channel_default_dataline_flag,
+                                   self.channel_default_dataline_status, "dataline status")
+
+    def _handle_set_device_address(self, channel, value):
+        """Handle a set-device-address ACK (no state change)."""
+        logger.debug("set_device_address ACK")
+
+    def _handle_get_device_address(self, channel, value):
+        """Cache the device address from a reply (channel = MSB, value = LSB)."""
+        self.device_address = (channel << 8) | value
+        logger.debug(f"device address: {self.device_address}")
+
+    def _handle_reboot_mcu(self, channel, value):
+        """Handle a reboot-MCU ACK (no state change)."""
+        logger.debug("reboot_mcu ACK")
+
+    def _handle_identify_device(self, channel, value):
+        """Handle an identify-device ACK (LED blink started on device)."""
+        logger.debug("identify_device ACK")
+
+    def _handle_channel_name(self, channel, value):
+        """Cache a channel display name from a V3 response."""
+        if not (isinstance(value, dict) and value.get("v3")):
+            logger.debug("channel_name ACK without V3 payload")
+            return
+        payload = bytes(value.get("payload", b""))
+        if len(payload) < 1:
+            return
+        ch = int(payload[0])
+        if ch < 1:
+            return
+        try:
+            name = payload[1:].decode("utf-8", errors="ignore").strip("\x00 \r\n\t")
+        except Exception:
+            name = ""
+        self.channel_names[ch] = name or f"CH{ch}"
+
+    def _handle_device_alias(self, channel, value):
+        """Cache the device alias from a V3 response."""
+        if not (isinstance(value, dict) and value.get("v3")):
+            logger.debug("device_alias ACK without V3 payload")
+            return
+        payload = bytes(value.get("payload", b""))
+        try:
+            alias = payload.decode("utf-8", errors="ignore").strip("\x00 \r\n\t")
+        except Exception:
+            alias = ""
+        self.device_alias = alias
+
+    def _handle_factory_reset(self, channel, value):
+        """Handle a factory-reset ACK (no state change)."""
+        logger.debug("factory_reset ACK")
+
+    def _handle_firmware_version(self, channel, value):
+        """Cache the firmware version from a reply."""
+        if isinstance(channel, int) and channel > 0:
+            self.firmware_version_major = channel
+            self.firmware_version_minor = value
+        else:
+            self.firmware_version_major = 1
+            self.firmware_version_minor = value
         self.firmware_version = value
 
-    def _handle_hardware_version(self, value):
-        logger.debug("_handle_hardware_version ACK")
+    def _handle_hardware_version(self, channel, value):
+        """Cache the hardware version from a reply."""
         self.hardware_version = value
 
-    def _handle_set_auto_restore(self):
-        logger.debug("_handle_set_auto_restore ACK")
+    def _handle_product_type(self, channel, value):
+        """Cache the product type from a reply."""
+        self.product_type = value
 
-    def _handle_get_auto_restore_status(self,value):
-        logger.debug(f"_handle_get_auto_restore_status ACK,value:{value}")
+    def _handle_get_max_channels(self, channel, value):
+        """
+        Cache the maximum channel count, inferring from product type if unsupported.
+
+        Firmware that does not support the command replies with 0xFF; in that case
+        the channel count is inferred from ``PRODUCT_TYPE_TABLE`` when possible.
+        """
+        if value == 0xFF or value > 16:
+            logger.warning(f"Suspicious max_channels value: {value} (0x{value:02X}); "
+                           f"the device may not support this command.")
+            if value == 0xFF and self.product_type is not None:
+                product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+                if product_info is not None:
+                    self.max_channels = product_info["channels"]
+                    logger.info(f"Inferring max_channels={self.max_channels} "
+                                f"from product type {product_info['name']}")
+                    return
+        self.max_channels = value
+
+    def _handle_serial_no(self, channel, value):
+        """
+        Cache the serial number from a reply.
+
+        New firmware replies with a V1 ACK whose value is the ASCII length, then
+        a V3 payload containing the full serial string. Older firmware may only
+        send the V1 ACK, so keep a graceful "N/A" fallback.
+        """
+        if isinstance(value, dict) and value.get("v3"):
+            payload = value.get("payload", b"")
+            try:
+                serial = bytes(payload).decode("ascii", errors="ignore").strip("\x00 \r\n\t")
+            except Exception:
+                serial = ""
+            self.serial_no = serial or "N/A"
+            return
+        if isinstance(value, int) and value == 0:
+            self.serial_no = "N/A"
+
+    def _handle_set_auto_restore(self, channel, value):
+        """Handle a set-auto-restore ACK (no state change)."""
+        logger.debug("set_auto_restore ACK")
+
+    def _handle_get_auto_restore_status(self, channel, value):
+        """Cache auto-restore state from a status reply."""
         self.auto_restore_status = value
+
+    def _resolve_channels(self, channels):
+        """
+        --- Helpers -------------------------------------------------------------
+
+        Normalize a variadic channel argument, defaulting to all channels.
+
+        Accepts either separate channel arguments or a single iterable. When empty,
+        expands to every channel the device has (from ``max_channels``, falling back
+        to the product table or 7).
+
+        :param channels: The variadic channels tuple as received by a public method.
+
+        :returns: A tuple of 1-based channel numbers.
+        """
+        if len(channels) == 1 and isinstance(channels[0], (list, tuple, set)):
+            channels = tuple(channels[0])
+        if not channels:
+            n = self.max_channels
+            if not isinstance(n, int) or n <= 0 or n == 0xFF:
+                product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+                n = product_info["channels"] if product_info else 7
+            channels = tuple(range(1, n + 1))
+        return channels
+
+    def get_channels(self):
+        """
+        Return all valid 1-based channel numbers for the connected product.
+
+        Uses the cached max-channel value when available, then falls back to
+        CMD_GET_MAX_CHANNELS and finally the product capability table.
+
+        :returns: Tuple such as (1, 2, 3, 4).
+
+        :raises RuntimeError: If the count cannot be resolved.
+        """
+        n = self.max_channels
+        if not isinstance(n, int) or n <= 0 or n == 0xFF:
+            n = self.get_max_channels()
+        if not isinstance(n, int) or n <= 0 or n == 0xFF:
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            n = product_info["channels"] if product_info else None
+        if not isinstance(n, int) or n <= 0 or n == 0xFF:
+            raise RuntimeError(f"Cannot determine max channel count: {n!r}")
+        return tuple(range(1, n + 1))
+
+    def _filter_channel_dict(self, source, channels):
+        """
+        Build a result dict copy from a cached per-channel state dict.
+
+        :param source: Source dict keyed by channel number.
+
+        :param channels: Channels to include; empty means all keys in ``source.``
+
+        :returns: A new dict containing only the requested, known channels.
+        """
+        if channels:
+            return {ch: source[ch] for ch in channels if ch in source}
+        return dict(source)
+
+    def _measurement_snapshot(self, channels, valid_default, include_stream_meta=False):
+        """
+        Snapshot cached measurements for the given channels.
+
+        :param channels: Channels to include.
+
+        :param valid_default: Default for the "valid" flag when not yet known.
+
+        :param include_stream_meta: Include sample_tick/sample_period_ms entries.
+
+        :returns: Dict {channel: {voltage, current, fresh, stale, valid, ...}}.
+        """
+        result = {}
+        for ch in channels:
+            if ch not in self.channel_voltages and ch not in self.channel_currents:
+                continue
+            fresh = self.channel_measurement_fresh.get(ch, False)
+            entry = {
+                "voltage": self.channel_voltages.get(ch),
+                "current": self.channel_currents.get(ch),
+                "fresh": fresh,
+                "stale": not fresh,
+                "valid": self.channel_measurement_valid.get(ch, valid_default),
+            }
+            if include_stream_meta:
+                entry["sample_tick"] = self.channel_measurement_sample_tick.get(ch)
+                entry["sample_period_ms"] = self._measurement_stream_period_ms
+            result[ch] = entry
+        return result
+
+    def _retry_get_info(self, get_func, info_name, max_retry_time=10.0):
+        """
+        Repeatedly call a getter until it returns non-None or the deadline passes.
+
+        :param get_func: Zero-argument getter to retry.
+
+        :param info_name: Label used in log messages.
+
+        :param max_retry_time: Maximum total retry time in seconds.
+
+        :returns: The retrieved value, or None on timeout.
+        """
+        start_time = time.time()
+        retry_count = 0
+        while True:
+            result = get_func()
+            if result is not None:
+                logger.debug(f"{info_name} retrieved after {retry_count} retries, "
+                             f"{time.time() - start_time:.2f}s")
+                return result
+
+            elapsed = time.time() - start_time
+            if elapsed >= max_retry_time:
+                logger.error(f"{info_name} failed after {retry_count} retries, "
+                             f"{elapsed:.2f}s - giving up")
+                return None
+
+            retry_count += 1
+            # Back off gradually: fast at first, then slower.
+            if retry_count <= 3:
+                time.sleep(0.05)
+            elif retry_count <= 10:
+                time.sleep(0.1)
+            else:
+                time.sleep(0.2)
+
+    def _is_legacy_v1_firmware(self):
+        """
+        Return True when the firmware-version reply used the legacy V1 shape.
+
+        V1 firmware reports only the minor version in the value byte and leaves
+        the channel byte at zero. Newer firmware uses the channel byte as a
+        major-version field, so this check does not need unsupported-command
+        timeouts.
+        """
+        return self.firmware_version_major == 1
 
     def get_device_info(self):
         """
-        Returns the hub's ID, hardware version, firmware version, operate mode, and button control status.
+        Read and cache the hub's identity and configuration.
 
-        Returns:
-            dict: A dictionary containing the hub's information.
+        Critical items (versions, operate mode, ...) are retried for up to ~10 s
+        each to tolerate a device that is still initializing. Optional items not
+        supported by older firmware are treated as unavailable.
+
+        :returns: Dict describing the hub (id, address, versions, product, mode, ...).
         """
-        self.hardware_version = self.get_hardware_version()
-        self.firmware_version =  self.get_firmware_version()
-        self.operate_mode = self.get_operate_mode()
-        self.auto_restore_status = self.get_auto_restore_status()
-        self.button_control_status = self.get_button_control_status()
-        self.device_address = self.get_device_address()
-        self.channel_default_power_status = self.get_default_power_status(1,2,3,4)
-        self.channel_default_dataline_status = self.get_default_dataline_status(1,2,3,4)
+        logger.info("Reading device info (retrying up to 10s per critical item)...")
 
+        self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
+        self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
+
+        if self._is_legacy_v1_firmware():
+            self.product_type = 0x00
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            self.max_channels = product_info["channels"] if product_info is not None else 4
+            self.serial_no = "N/A"
+            self.device_alias = ""
+            logger.info("Legacy V1 firmware detected; using HBP_USB2_4CH defaults "
+                        "without probing newer identity commands")
+        else:
+            self.product_type = self.get_product_type()
+            if self.product_type is None:
+                self.product_type = 0x00
+                logger.info("CMD_GET_PRODUCT_TYPE unsupported; defaulting to HBP_USB2_4CH")
+
+            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            # Optional on old firmware: infer channel count from the product type.
+            self.max_channels = self.get_max_channels()
+            if self.max_channels is None or self.max_channels == 0xFF:
+                if product_info is not None:
+                    self.max_channels = product_info["channels"]
+                    logger.info(f"CMD_GET_MAX_CHANNELS unsupported; inferring "
+                                f"max_channels={self.max_channels} from {product_info['name']}")
+
+            self.serial_no = self.get_serial_no()  # optional
+            self.device_alias = self.get_device_alias() or ""
+
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        if product_info is not None:
+            self.com_timeout = product_info.get("ack_timeout", 0.1)
+            logger.info(f"ACK timeout set to {self.com_timeout}s for {product_info['name']}")
+
+        self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
+        self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
+        self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
+        self.device_address = self._retry_get_info(self.get_device_address, "device_address")
+
+        # Warm the default-state caches for every channel (best effort).
+        n = self.max_channels if isinstance(self.max_channels, int) and self.max_channels > 0 else 4
+        channels = tuple(range(1, n + 1))
+        self.get_default_power_status(*channels)
+        self.get_default_dataline_status(*channels)
+
+        product_type_name = (product_info["name"] if product_info is not None
+                             else (f"Unknown({self.product_type})" if self.product_type is not None else "N/A"))
         hub_info = {
             "id": self.port.split("/")[-1],
             "address": self.device_address,
             "hardware_version": self.hardware_version,
             "firmware_version": self.firmware_version,
-            "operate_mode": "normal" if self.operate_mode == 0 else "interlock" if self.operate_mode == 1 else "N/A",
+            "firmware_version_major": self.firmware_version_major,
+            "firmware_version_minor": self.firmware_version_minor,
+            "product_type": product_type_name,
+            "max_channels": self.max_channels if self.max_channels is not None else "N/A",
+            "serial_no": self.serial_no if self.serial_no else "N/A",
+            "device_alias": self.device_alias,
+            "operate_mode": ("normal" if self.operate_mode == 0
+                             else "interlock" if self.operate_mode == 1 else "N/A"),
             "auto_restore": "enabled" if self.auto_restore_status == 1 else "disabled",
-            "button_control_status": "enabled" if self.button_control_status == 1 else "disabled"
+            "button_control_status": "enabled" if self.button_control_status == 1 else "disabled",
         }
+
+        if self.operate_mode is None:
+            logger.error("Failed to get operate mode after retries - this is critical!")
+        for name in ("hardware_version", "firmware_version", "product_type",
+                     "max_channels", "serial_no"):
+            if getattr(self, name) is None:
+                logger.warning(f"Failed to get {name} after retries")
         return hub_info
-    
+
+    @synchronized
     def set_operate_mode(self, mode):
         """
-        Set the device's operating mode.
+        Set the device operating mode.
 
-        Args:
-            mode (int): The desired operating mode.
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :param mode: ``OPERATE_MODE_NORMAL`` (0) or ``OPERATE_MODE_INTERLOCK`` (1).
+
+        :returns: True if acknowledged, False otherwise.
         """
+        self.ack_events[CMD_SET_OPERATE_MODE].clear()
         self._send_packet(CMD_SET_OPERATE_MODE, None, mode)
-        ack_event = self.ack_events[CMD_SET_OPERATE_MODE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_operate_mode ACK")
+        if self._wait_for_ack_with_recovery(CMD_SET_OPERATE_MODE):
             return True
-        else:
-            logger.error("set_operate_mode No ACK!")
-            return False
+        logger.error("set_operate_mode No ACK!")
+        return False
 
+    @synchronized
     def get_operate_mode(self):
         """
-        Sends a command to verify the current operating mode of the device.
+        Query the current operating mode.
 
-        Returns:
-            bool: True if the device responds in the expected mode, otherwise False.
+        :returns: 0 (normal), 1 (interlock), or None if no response.
         """
-        command = self._send_packet(CMD_GET_OPERATE_MODE, None, None)
         ack_event = self.ack_events[CMD_GET_OPERATE_MODE]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_operate_mode ACK")
-            logger.debug(f"operate_mode: {self.operate_mode}")
-            if self.operate_mode is None:
-                logger.warning("get_operate_mode No ACK!")
+        self._send_packet(CMD_GET_OPERATE_MODE, None, None)
+        if ack_event.wait(self.com_timeout):
             return self.operate_mode
-        else:
-            self.operate_mode = None
-            logger.warning("get_operate_mode No ACK!")
-            return None
+        self.operate_mode = None
+        logger.warning("get_operate_mode No ACK!")
+        return None
 
+    @synchronized
     def set_channel_power(self, *channels, state):
         """
-        Sets the power state of one or more USB channels.
+        Set the power state of one or more channels.
 
-        Args:
-            *channels (int): Channel numbers (1-4) to be updated.
-            state (int): 1 to turn on power, 0 to turn off.
+        :param channels: Channel numbers (1-based) to update.
 
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :param state: 1 to power on, 0 to power off.
+
+        :returns: True if acknowledged, False otherwise.
         """
+        self.ack_events[CMD_SET_CHANNEL_POWER].clear()
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("set_channel_power ACK")
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
             return True
-        else:
-            logger.error("set_channel_power No ACK!")
-            return False
+        logger.error("set_channel_power No ACK!")
+        return False
 
+    @synchronized
     def get_channel_power_status(self, *channels):
         """
-        Requests the power status of specified channels.
+        Query the power status of one or more channels.
 
-        Args:
-            *channels (int): Channels to query.
+        :param channels: Channels to query.
 
-        Returns:
-            dict or int or None: A dictionary with channel numbers as keys and power states as values if multiple channels are queried,
-                                 the power state of the single channel if only one channel is queried,
-                                 or None if timed out.
+        :returns: For a single channel, its power state; for multiple, a dict {channel: state}; or None on timeout.
         """
-        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        if len(channels) > 1:
+            # Drop stale entries, then wait until every requested channel's fresh
+            # reply frame has landed (deterministic; no fixed settle delay).
+            for ch in channels:
+                self.channel_power_status.pop(ch, None)
+            self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+            self._wait_for_channel_cache(self.channel_power_status, channels)
+            result = {ch: self.channel_power_status[ch]
+                      for ch in channels if ch in self.channel_power_status}
+            return result if result else None
+
         ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_channel_power_status ACK")
+        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
+        if ack_event.wait(self.com_timeout):
+            return self.channel_power_status.get(channels[0])
+        logger.error("get_channel_power_status No ACK!")
+        return None
 
-            if len(channels) == 1:
-                return self.channel_power_status.get(channels[0], None)
-            logger.debug(f"get_channel_power_status: {self.channel_power_status}")
-            return self.channel_power_status
-        else:
-            logger.error("get_channel_power_status No ACK!")
-            return None
-
-    def set_channel_power_interlock(self,channel):
+    @synchronized
+    def get_channel_oc_status(self):
         """
-        Sets the interlock mode for a specified channel or all channels.
+        Query per-channel overcurrent status.
 
-        Args:
-            channel (int or None): The channel to set. If None, all channels will be turn off.
-
-        Returns:
-            bool: True if the command was acknowledged, False otherwise.
+        :returns: Dict {channel: {'active': bool, 'latch': bool}}, or None on timeout. 'active' is the live FLAG# state; 'latch' is sticky until cleared.
         """
-        if channel is None:
-            # If channel is None, set interlock mode for all channels
-            self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, None,0)
-        else:
-            channels = [channel]
-            self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, channels,1)
-
-        ack_event = self.ack_events[CMD_SET_CHANNEL_POWER_INTERLOCK]
+        ack_event = self.ack_events[CMD_GET_CHANNEL_OC_STATUS]
         ack_event.clear()
-        if ack_event.wait(timeout=self.com_timeout): 
-            logger.debug("set_channel_power_interlock ACK")
+        self._send_packet(CMD_GET_CHANNEL_OC_STATUS, None, 0)
+        if ack_event.wait(self.com_timeout):
+            return {ch: {'active': self.channel_oc_active.get(ch, False),
+                         'latch': self.channel_oc_latch.get(ch, False)}
+                    for ch in sorted(self.channel_oc_active)}
+        logger.error("get_channel_oc_status No ACK!")
+        return None
+
+    @synchronized
+    def clear_channel_oc_latch(self, *channels):
+        """
+        Clear the sticky overcurrent latch for one or more channels.
+
+        :param channels: Channels to clear; no arguments clears all channels.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        if not channels:
+            n = self.max_channels if isinstance(self.max_channels, int) and 0 < self.max_channels <= 16 else 7
+            channels = tuple(range(1, n + 1))
+        ack_event = self.ack_events[CMD_CLEAR_CHANNEL_OC_LATCH]
+        ack_event.clear()
+        self._send_packet(CMD_CLEAR_CHANNEL_OC_LATCH, channels, 0)
+        if ack_event.wait(self.com_timeout):
             return True
+        logger.error("clear_channel_oc_latch No ACK!")
+        return False
+
+    @synchronized
+    def set_channel_power_interlock(self, channel):
+        """
+        Set interlock mode for a channel, or release all channels.
+
+        :param channel: Channel to interlock, or None to turn all channels off.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        self.ack_events[CMD_SET_CHANNEL_POWER_INTERLOCK].clear()
+        if channel is None:
+            self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, None, 0)
         else:
-            logger.error("set_channel_power_interlock No ACK!")
-            return False
-        
+            self._send_packet(CMD_SET_CHANNEL_POWER_INTERLOCK, [channel], 1)
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER_INTERLOCK):
+            return True
+        logger.error("set_channel_power_interlock No ACK!")
+        return False
+
+    def _raise_adc_unsupported(self):
+        """
+        Raise a descriptive error when the model lacks ADC monitoring.
+
+        :raises FeatureNotSupportedError: Always.
+        """
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+        raise FeatureNotSupportedError(
+            f"Product {product_name} does not support voltage/current monitoring (ADC). "
+            f"This feature is not available on this device model.")
+
+    @synchronized
     def get_channel_voltage(self, channel):
         """
-        Returns the voltage of a single channel.
+        Read the voltage of a single channel.
 
-        Args:
-            channel (int): The channel to query.
+        :param channel: Channel to query.
 
-        Returns:
-            int or None: Voltage reading for the channel, or None if timed out.
+        :returns: Voltage in mV, or None on timeout.
+
+        :raises FeatureNotSupportedError: If the model lacks ADC monitoring.
+
+        :raises ValueError: If a list/tuple is passed instead of a single channel.
         """
         if isinstance(channel, (list, tuple)):
             raise ValueError("get_channel_voltage only supports a single channel")
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
 
-        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
         ack_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
         ack_event.clear()
+        self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [channel])
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_voltage ACK")
             return self.channel_voltages.get(channel)
-        else:
-            logger.error("get_channel_voltage No ACK!")
-            return None
+        logger.error("get_channel_voltage No ACK!")
+        return None
 
+    @synchronized
     def get_channel_current(self, channel):
         """
-        Returns the current reading of a single channel.
+        Read the current of a single channel.
 
-        Args:
-            channel (int): The channel to query.
+        :param channel: Channel to query.
 
-        Returns:
-            int or None: Current reading for the channel, or None if timed out.
+        :returns: Current in mA, or None on timeout.
+
+        :raises FeatureNotSupportedError: If the model lacks ADC monitoring.
+
+        :raises ValueError: If a list/tuple is passed instead of a single channel.
         """
         if isinstance(channel, (list, tuple)):
-            raise ValueError("get_channel_voltage only supports a single channel")
+            raise ValueError("get_channel_current only supports a single channel")
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
 
-        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
         ack_event = self.ack_events[CMD_GET_CHANNEL_CURRENT]
         ack_event.clear()
+        self._send_packet(CMD_GET_CHANNEL_CURRENT, [channel])
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_channel_current ACK")
             return self.channel_currents.get(channel)
-        else:
-            logger.error("get_channel_current No ACK!")
-            return None
+        logger.error("get_channel_current No ACK!")
+        return None
+
+    @synchronized
+    def get_channel_measurements(self, *channels):
+        """
+        Read voltage/current for multiple channels in one V3 request.
+
+        :param channels: Channels to query; if omitted, all channels are queried.
+
+        :returns: Dict {channel: {"voltage", "current", "fresh", "stale", "valid"}}, or None on timeout.
+
+        :raises FeatureNotSupportedError: If the model lacks ADC monitoring.
+        """
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
+        channels = self._resolve_channels(channels)
+
+        if self._is_legacy_v1_firmware():
+            result = {}
+            for ch in channels:
+                voltage_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
+                voltage_event.clear()
+                self._send_packet(CMD_GET_CHANNEL_VOLTAGE, [ch])
+                if not voltage_event.wait(self.com_timeout):
+                    logger.error("get_channel_measurements legacy voltage No ACK!")
+                    return None
+
+                current_event = self.ack_events[CMD_GET_CHANNEL_CURRENT]
+                current_event.clear()
+                self._send_packet(CMD_GET_CHANNEL_CURRENT, [ch])
+                if not current_event.wait(self.com_timeout):
+                    logger.error("get_channel_measurements legacy current No ACK!")
+                    return None
+
+                result[ch] = {
+                    "voltage": self.channel_voltages.get(ch),
+                    "current": self.channel_currents.get(ch),
+                    "fresh": True,
+                    "stale": False,
+                    "valid": True,
+                }
+            return result
+
+        ack_event = self.ack_events[CMD_GET_CHANNEL_MEASUREMENTS]
+        channel_mask = sum(1 << (ch - 1) for ch in channels)
+        for attempt in range(3):
+            ack_event.clear()
+            self._send_v3_packet(CMD_GET_CHANNEL_MEASUREMENTS, [channel_mask, 0x00])
+            if ack_event.wait(self.com_timeout):
+                if self._last_v3_status.get(CMD_GET_CHANNEL_MEASUREMENTS) == V3_STATUS_OK:
+                    result = self._measurement_snapshot(channels, valid_default=True)
+                    has_fresh = any(item["fresh"] for item in result.values())
+                    if result and any(item["valid"] for item in result.values()) and has_fresh:
+                        return result
+                    if attempt < 2:
+                        time.sleep(0.06)
+                        continue
+                    logger.warning("V3 measurement response contained no valid channel data")
+                else:
+                    logger.warning("V3 measurement command returned an error")
+                break
+            if attempt < 2:
+                time.sleep(0.02)
+
+        logger.error("get_channel_measurements No ACK!")
+        return None
+
+    def get_stream_channel_measurements(self, *channels, timeout=None, wait_new_sample=True):
+        """
+        Wait for the next V3 measurement stream frame and return its readings.
+
+        Does not send a request; the device must already have streaming enabled via
+        ``set_channel_measurement_stream.``
+
+        :param channels: Channels to include; if omitted, all channels.
+
+        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout.``
+
+        :param wait_new_sample: If True, wait for a new sample tick; if False, accept the next stream frame even with the same tick.
+
+        :returns: Dict of per-channel readings (with sample_tick/sample_period_ms), or None.
+        """
+        channels = self._resolve_channels(channels)
+        if timeout is None:
+            timeout = self.com_timeout
+
+        deadline = time.monotonic() + timeout
+        with self._measurement_stream_condition:
+            start_seq = self._measurement_stream_seq
+            start_tick = self._measurement_stream_tick
+            while True:
+                has_channels = any(ch in self.channel_voltages or ch in self.channel_currents
+                                   for ch in channels)
+                got_new_frame = self._measurement_stream_seq != start_seq
+                got_new_sample = (self._measurement_stream_tick is not None
+                                  and (start_tick is None
+                                       or self._measurement_stream_tick != start_tick))
+                if has_channels and (got_new_sample if wait_new_sample else got_new_frame):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._measurement_stream_condition.wait(remaining)
+
+            return self._measurement_snapshot(channels, valid_default=False, include_stream_meta=True)
+
+    @synchronized
+    def set_channel_measurement_stream(self, *channels, enabled=True, wait_ack=True):
+        """
+        Enable or disable V3 measurement streaming.
+
+        Stream frames are unsolicited V3 notifications and are not acknowledged by
+        the host.
+
+        :param channels: Channels to stream; if omitted, all channels.
+
+        :param enabled: True to enable streaming, False to disable.
+
+        :param wait_ack: If True, wait for the command ACK before returning.
+
+        :returns: True on success (or when ``wait_ack`` is False), False on timeout.
+        """
+        channels = self._resolve_channels(channels)
+        channel_mask = sum(1 << (ch - 1) for ch in channels)
+        flags = V3_MEAS_FLAG_STREAM_ENABLE if enabled else V3_MEAS_FLAG_STREAM_DISABLE
+        ack_event = self.ack_events[CMD_GET_CHANNEL_MEASUREMENTS]
+        ack_event.clear()
+        self._send_v3_packet(CMD_GET_CHANNEL_MEASUREMENTS, [channel_mask, flags])
+        if not wait_ack:
+            return True
+        if ack_event.wait(self.com_timeout):
+            return True
+        logger.error("set_channel_measurement_stream No ACK!")
+        return False
+
+    def get_latest_measurements(self, *channels):
+        """
+        Return the most recently received measurements without blocking.
+
+        Returns whatever the background receiver has cached. Requires that
+        streaming was started via ``set_channel_measurement_stream.``
+
+        :param channels: Channels to include; if omitted, all channels.
+
+        :returns: Dict of per-channel readings, or None if nothing has been received.
+        """
+        channels = self._resolve_channels(channels)
+        with self._measurement_stream_condition:
+            result = self._measurement_snapshot(channels, valid_default=False, include_stream_meta=True)
+        return result if result else None
+
+    @synchronized
+    def set_channel_usb2_dataline(self, *channels, state):
+        """
+        Set the USB2.0 data-line state of one or more channels.
+
+        :param channels: Channels to update.
+
+        :param state: 1 to connect the data line, 0 to disconnect.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        self.ack_events[CMD_SET_CHANNEL_DATALINE].clear()
+        self._send_packet(CMD_SET_CHANNEL_DATALINE, channels, state)
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_DATALINE):
+            return True
+        logger.error("set_channel_usb2_dataline No ACK!")
+        return False
 
     def set_channel_dataline(self, *channels, state):
         """
-        Sends a command to set the data line state of specific channels.
+        Backward-compatible alias for the V1 API name.
 
-        Args:
-            value (int): New data line state.
-            *channels (int): Channels to update.
-            state (int): 1 to enable data line, 0 to disable.
+        Older releases exposed USB2 data-line control as
+        ``set_channel_dataline``. Keep that spelling available while the newer
+        API uses ``set_channel_usb2_dataline`` for clarity.
         """
-        self._send_packet(CMD_SET_CHANNEL_DATALINE, channels, state)
-        ack_event = self.ack_events[CMD_SET_CHANNEL_DATALINE]
+        return self.set_channel_usb2_dataline(*channels, state=state)
+
+    @synchronized
+    def get_channel_usb2_dataline_status(self, *channels):
+        """
+        Query the USB2.0 data-line status of one or more channels.
+
+        :param channels: Channels to query; if omitted, returns all known channels.
+
+        :returns: Dict {channel: state} for the requested channels, or None on timeout.
+        """
+        if len(channels) > 1:
+            # Drop stale entries, then wait until every requested channel's fresh
+            # reply frame has landed (deterministic; no fixed settle delay).
+            for ch in channels:
+                self.channel_dataline_status.pop(ch, None)
+            self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+            self._wait_for_channel_cache(self.channel_dataline_status, channels)
+            result = self._filter_channel_dict(self.channel_dataline_status, channels)
+            return result if result else None
+
+        ack_event = self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("set_channel_dataline ACK")
-            return True
-        else:
-            logger.error("set_channel_dataline No ACK!")
-            return False
+        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
+        if ack_event.wait(self.com_timeout):
+            return self._filter_channel_dict(self.channel_dataline_status, channels)
+        logger.error("get_channel_usb2_dataline_status No ACK!")
+        return None
 
     def get_channel_dataline_status(self, *channels):
         """
-        Requests the data line status for specified channels.
+        Backward-compatible alias for the V1 API name.
 
-        Args:
-            *channels (int): Channels to query.
-
-        Returns:
-            dict or None: A dictionary with channel numbers as keys and data line states as values, or None if timed out.
+        Older releases exposed USB2 data-line status as
+        ``get_channel_dataline_status``. Keep that spelling available while the
+        newer API uses ``get_channel_usb2_dataline_status`` for clarity.
         """
-        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
-        ack_event = self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_channel_dataline_status ACK")
-            return self.channel_dataline_status
-        else:
-            logger.error("get_channel_dataline_status No ACK!")
-            return None
+        return self.get_channel_usb2_dataline_status(*channels)
 
+    @synchronized
     def set_button_control(self, enable: bool):
         """
         Enable or disable the hub's physical buttons.
 
-        Args:
-            enable (bool): True to enable buttons, False to disable.
+        :param enable: True to enable buttons, False to disable.
 
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :returns: True if acknowledged, False otherwise.
         """
-        data_val = 1 if enable else 0
-
-        self._send_packet(CMD_SET_BUTTON_CONTROL, None, data_val)
-        ack_event = self.ack_events[CMD_SET_BUTTON_CONTROL]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_button_control ACK")
+        self.ack_events[CMD_SET_BUTTON_CONTROL].clear()
+        self._send_packet(CMD_SET_BUTTON_CONTROL, None, 1 if enable else 0)
+        if self._wait_for_ack_with_recovery(CMD_SET_BUTTON_CONTROL):
             return True
-        else:
-            logger.error("set_button_control No ACK!")
-            return False
+        logger.error("set_button_control No ACK!")
+        return False
 
+    @synchronized
     def get_button_control_status(self):
         """
-        Query whether the hub's physical buttons are enabled or disabled.
+        Query whether the hub's physical buttons are enabled.
 
-        Returns:
-            int or None: 1 if enabled, 0 if disabled, or None if no response.
+        :returns: 1 if enabled, 0 if disabled, or None if no response.
         """
-        self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
         ack_event = self.ack_events[CMD_GET_BUTTON_CONTROL_STATUS]
         ack_event.clear()
+        self._send_packet(CMD_GET_BUTTON_CONTROL_STATUS, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_button_control_status ACK")
             return self.button_control_status
-        else:
-            logger.error("get_button_control_status No ACK!")
-            return None
+        logger.error("get_button_control_status No ACK!")
+        return None
 
-    def set_default_power_status(self,*channels,enable,status=None):
+    @synchronized
+    def set_default_power_status(self, *channels, enable, status=None):
         """
-        Sets the default power status for one or more channels.
+        Set the power-on default power state for one or more channels.
 
-        Args:
-            *channels (int): Channels to configure.
-            enable (int): 1 to enable default power status, 0 to disable.
-            status (int, optional): Default power state when enabled. 1 for ON, 0 for OFF. Defaults to 0.
+        :param channels: Channels to configure.
 
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :param enable: 1 to apply a default power state, 0 to disable defaulting.
+
+        :param status: Default state when enabled: 1 for ON, 0 for OFF (default 0).
+
+        :returns: True if acknowledged, False otherwise.
         """
         if status is None:
             status = 0
-        self._send_packet(CMD_SET_DEFAULT_POWER_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_POWER_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("set_default_power_status ACK")
+        self.ack_events[CMD_SET_DEFAULT_POWER_STATUS].clear()
+        self._send_packet(CMD_SET_DEFAULT_POWER_STATUS, channels, [enable, status])
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_POWER_STATUS):
             return True
-        else:
-            logger.error("set_default_power_status No ACK!")
-            return False
+        logger.error("set_default_power_status No ACK!")
+        return False
 
-    def get_default_power_status(self,*channels):
+    @synchronized
+    def get_default_power_status(self, *channels):
         """
-        Retrieves the default power status configuration for specified channels.
+        Query the default power configuration for one or more channels.
 
-        Args:
-            *channels (int): Channels to query.
+        :param channels: Channels to query.
 
-        Returns:
-            dict or None: Dictionary with enabled status and default value per channel, or None if no response.
+        :returns: Dict {channel: {"enabled", "value"}}, or None if no response.
         """
-        self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels,[0,0])
         ack_event = self.ack_events[CMD_GET_DEFAULT_POWER_STATUS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_default_power_status ACK")
+        self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels, [0, 0])
+        if ack_event.wait(self.com_timeout):
             result = {}
             for ch in channels:
                 enable = self.channel_default_power_flag.get(ch)
                 status = self.channel_default_power_status.get(ch)
                 if enable is not None and status is not None:
-                    result[ch] = {
-                        "enabled": enable,
-                        "value": status
-                    }
-                    logger.info(f"channel {ch} default power status: enabled={enable}, value={status}")
+                    result[ch] = {"enabled": enable, "value": status}
             return result
-        else:
-            logger.error("get_default_power_status No ACK!")
-            return None
-    
-    def set_default_dataline_status(self,*channels,enable,status=None):
+        logger.error("get_default_power_status No ACK!")
+        return None
+
+    @synchronized
+    def set_default_dataline_status(self, *channels, enable, status=None):
         """
-        Sets the default dataline status for one or more channels.
+        Set the power-on default data-line state for one or more channels.
 
-        Args:
-            *channels (int): Channels to configure.
-            enable (int): 1 to enable default dataline status, 0 to disable.
-            status (int, optional): Default dataline state when enabled. 1 for Connected, 0 for Disconnected. Defaults to 0.
+        :param channels: Channels to configure.
 
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :param enable: 1 to apply a default data-line state, 0 to disable defaulting.
+
+        :param status: Default state when enabled: 1 for connected, 0 for disconnected (default 0).
+
+        :returns: True if acknowledged, False otherwise.
         """
         if status is None:
             status = 0
-        self._send_packet(CMD_SET_DEFAULT_DATALINE_STATUS,channels,[enable,status])
-        ack_event = self.ack_events[CMD_SET_DEFAULT_DATALINE_STATUS]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("set_default_dataline_status ACK")
+        self.ack_events[CMD_SET_DEFAULT_DATALINE_STATUS].clear()
+        self._send_packet(CMD_SET_DEFAULT_DATALINE_STATUS, channels, [enable, status])
+        if self._wait_for_ack_with_recovery(CMD_SET_DEFAULT_DATALINE_STATUS):
             return True
-        else:
-            logger.error("set_default_dataline_status No ACK!")
-            return False
+        logger.error("set_default_dataline_status No ACK!")
+        return False
 
-    def get_default_dataline_status(self,*channels):
+    @synchronized
+    def get_default_dataline_status(self, *channels):
         """
-        Retrieves the default dataline status configuration for specified channels.
+        Query the default data-line configuration for one or more channels.
 
-        Args:
-            *channels (int): Channels to query.
+        :param channels: Channels to query.
 
-        Returns:
-            dict or None: Dictionary with enabled status and default value per channel, or None if no response.
+        :returns: Dict {channel: {"enabled", "value"}}, or None if no response.
         """
-        self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels,[0,0])
         ack_event = self.ack_events[CMD_GET_DEFAULT_DATALINE_STATUS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("get_default_dataline_status ACK")
+        self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels, [0, 0])
+        if ack_event.wait(self.com_timeout):
             result = {}
             for ch in channels:
                 enable = self.channel_default_dataline_flag.get(ch)
                 status = self.channel_default_dataline_status.get(ch)
                 if enable is not None and status is not None:
-                    result[ch] = {
-                        "enabled": enable,
-                        "value": status
-                    }
-                    logger.info(f"channel {ch} default dataline status: enabled={enable}, value={status}")
+                    result[ch] = {"enabled": enable, "value": status}
             return result
-        else:
-            logger.error("get_default_dataline_status No ACK!")
-            return None
-        
-    def set_auto_restore(self,enable:bool):
-        """
-        Enables or disables the auto-restore feature.
-        
-        Args:
-            enable (bool): True to enable auto-restore; False to disable.
-        
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
-        """
-        data_val = 1 if enable else 0
+        logger.error("get_default_dataline_status No ACK!")
+        return None
 
-        self._send_packet(CMD_SET_AUTO_RESTORE, None, data_val)
-        ack_event = self.ack_events[CMD_SET_AUTO_RESTORE]
-        ack_event.clear()
-        if ack_event.wait(self.com_timeout):
-            logger.debug("set_auto_restore ACK")
+    @synchronized
+    def set_auto_restore(self, enable: bool):
+        """
+        Enable or disable the auto-restore feature.
+
+        :param enable: True to enable auto-restore, False to disable.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        self.ack_events[CMD_SET_AUTO_RESTORE].clear()
+        self._send_packet(CMD_SET_AUTO_RESTORE, None, 1 if enable else 0)
+        if self._wait_for_ack_with_recovery(CMD_SET_AUTO_RESTORE):
             return True
-        else:
-            logger.error("set_auto_restore No ACK!")
-            return False
+        logger.error("set_auto_restore No ACK!")
+        return False
 
+    @synchronized
     def get_auto_restore_status(self):
         """
-        Queries whether auto-restore is enabled.
-    
-        Returns:
-            int or None: 1 if auto-restore is enabled, 0 if disabled, or None if no response.
+        Query whether auto-restore is enabled.
+
+        :returns: 1 if enabled, 0 if disabled, or None if no response.
         """
-        self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
         ack_event = self.ack_events[CMD_GET_AUTO_RESTORE_STATUS]
         ack_event.clear()
+        self._send_packet(CMD_GET_AUTO_RESTORE_STATUS, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_auto_restore_status ACK")
             return self.auto_restore_status
-        else:
-            logger.error("get_auto_restore_status No ACK!")
-            return None
+        logger.error("get_auto_restore_status No ACK!")
+        return None
 
+    @synchronized
     def set_device_address(self, address: int):
         """
-        Set the device address (uint16) for this Hub.
+        Set the 16-bit device address.
 
-        Args:
-            address (int): 0x0000 - 0xFFFF
-        
-        Returns:
-            bool: True if command was acknowledged, False otherwise.
+        :param address: Address in the range 0x0000 - 0xFFFF.
+
+        :returns: True if acknowledged, False otherwise.
+
+        :raises ValueError: If the address is out of range.
         """
         if not (0 <= address <= 0xFFFF):
             raise ValueError("Address must be between 0x0000 and 0xFFFF")
         lsb = address & 0xFF
         msb = (address >> 8) & 0xFF
-        self._send_packet(CMD_SET_DEVICE_ADDRESS,msb,lsb)
         ack_event = self.ack_events[CMD_SET_DEVICE_ADDRESS]
         ack_event.clear()
-        if ack_event.wait(self.com_timeout):  
-            logger.debug("set_device_address ACK")
+        self._send_packet(CMD_SET_DEVICE_ADDRESS, msb, lsb)
+        if ack_event.wait(self.com_timeout):
             self.device_address = address
             return True
-        else:
-            logger.error("set_device_address No ACK!")
-            return False
+        logger.error("set_device_address No ACK!")
+        return False
 
+    @synchronized
     def get_device_address(self):
         """
-        Get the current device address from the Hub.
+        Query the current device address.
 
-        Returns:
-            16-bit device address or None if no response.
+        :returns: The 16-bit device address, or None if no response.
         """
-        self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
-
         ack_event = self.ack_events[CMD_GET_DEVICE_ADDRESS]
         ack_event.clear()
+        self._send_packet(CMD_GET_DEVICE_ADDRESS, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_device_address ACK")
             return self.device_address
-        else:
-            logger.error("get_device_address No ACK!")
-            return None        
-        
+        logger.error("get_device_address No ACK!")
+        return None
+
+    @synchronized
+    def reboot_mcu(self):
+        """
+        Reboot the device MCU.
+
+        The MCU reboots ~100 ms after acknowledging, so the connection is lost and
+        the device must typically be reconnected afterwards.
+
+        :returns: True if the reboot command was acknowledged, False otherwise.
+        """
+        ack_event = self.ack_events[CMD_REBOOT_MCU]
+        ack_event.clear()
+        # Catch an ACK that may already be in flight.
+        time.sleep(0.001)
+        if ack_event.is_set():
+            ack_event.clear()
+            return True
+
+        self._send_packet(CMD_REBOOT_MCU, None, None)
+        # Longer timeout: the MCU delays ~100 ms after the ACK before rebooting.
+        if ack_event.wait(0.2):
+            return True
+        logger.error("reboot_mcu No ACK!")
+        return False
+
+    @synchronized
     def factory_reset(self):
         """
-        Sends a command to reset the device to factory settings.
-    
-        Returns:
-            bool: True if the reset command was acknowledged; False otherwise.
+        Reset the device to factory settings.
+
+        :returns: True if acknowledged, False otherwise.
         """
-        self._send_packet(CMD_FACTORY_RESET, None, None)
         ack_event = self.ack_events[CMD_FACTORY_RESET]
         ack_event.clear()
+        self._send_packet(CMD_FACTORY_RESET, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("factory_reset ACK")
             return True
-        else:
-            logger.error("factory_reset No ACK!")
-            return False
-        
+        logger.error("factory_reset No ACK!")
+        return False
+
+    @synchronized
+    def identify_device(self):
+        """
+        Blink the device status LED quickly for a few seconds.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        ack_event = self.ack_events[CMD_IDENTIFY_DEVICE]
+        ack_event.clear()
+        self._send_packet(CMD_IDENTIFY_DEVICE, None, None)
+        if ack_event.wait(self.com_timeout):
+            return True
+        logger.error("identify_device No ACK!")
+        return False
+
+    @staticmethod
+    def _default_channel_name(channel):
+        return f"CH{int(channel)}"
+
+    @staticmethod
+    def _encode_utf8_fit(text, max_bytes):
+        data = str(text or "").strip().encode("utf-8")[:max_bytes]
+        while True:
+            try:
+                data.decode("utf-8")
+                return data
+            except UnicodeDecodeError:
+                data = data[:-1]
+
+    @staticmethod
+    def _encode_channel_name(name):
+        return SmartUSBHub._encode_utf8_fit(name, 15)
+
+    @staticmethod
+    def _encode_device_alias(alias):
+        return SmartUSBHub._encode_utf8_fit(alias, 31)
+
+    @synchronized
+    def set_device_alias(self, alias):
+        """
+        Store a custom device alias in the device.
+
+        Empty aliases clear the custom alias. Alias is UTF-8, up to 31 bytes.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        ack_event = self.ack_events[CMD_SET_DEVICE_ALIAS]
+        ack_event.clear()
+        self.device_alias = ""
+        self._send_v3_packet(CMD_SET_DEVICE_ALIAS, self._encode_device_alias(alias))
+        if ack_event.wait(max(0.2, self.com_timeout)):
+            return True
+        logger.error("set_device_alias No ACK!")
+        return False
+
+    @synchronized
+    def get_device_alias(self):
+        """
+        Query the custom device alias.
+
+        :returns: Alias string, "" when unset, or None if no response.
+        """
+        ack_event = self.ack_events[CMD_GET_DEVICE_ALIAS]
+        ack_event.clear()
+        self.device_alias = ""
+        self._send_v3_packet(CMD_GET_DEVICE_ALIAS, b"")
+        if ack_event.wait(max(0.2, self.com_timeout)):
+            return self.device_alias or ""
+        logger.debug("get_device_alias No ACK (may be old firmware)")
+        return ""
+
+    @synchronized
+    def set_channel_name(self, channel, name):
+        """
+        Store a custom channel display name in the device.
+
+        Empty names clear the custom name and make the device fall back to CHn.
+        Names are stored as UTF-8, up to 15 bytes.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        channel = int(channel)
+        if channel < 1:
+            raise ValueError("channel must be >= 1")
+        ack_event = self.ack_events[CMD_SET_CHANNEL_NAME]
+        ack_event.clear()
+        self.channel_names.pop(channel, None)
+        payload = bytes([channel]) + self._encode_channel_name(name)
+        self._send_v3_packet(CMD_SET_CHANNEL_NAME, payload)
+        if ack_event.wait(max(0.2, self.com_timeout)):
+            return True
+        logger.error("set_channel_name No ACK!")
+        return False
+
+    @synchronized
+    def get_channel_name(self, channel):
+        """
+        Query a channel display name from the device.
+
+        :returns: Stored name, default CHn, or None if no response.
+        """
+        channel = int(channel)
+        if channel < 1:
+            raise ValueError("channel must be >= 1")
+        ack_event = self.ack_events[CMD_GET_CHANNEL_NAME]
+        ack_event.clear()
+        self.channel_names.pop(channel, None)
+        self._send_v3_packet(CMD_GET_CHANNEL_NAME, [channel])
+        if ack_event.wait(max(0.2, self.com_timeout)):
+            return self.channel_names.get(channel, self._default_channel_name(channel))
+        logger.debug("get_channel_name No ACK (may be old firmware)")
+        return self._default_channel_name(channel)
+
+    def get_channel_names(self, *channels):
+        """Query display names for one or more channels."""
+        resolved = self._resolve_channels(channels)
+        return {ch: self.get_channel_name(ch) for ch in resolved}
+
+    @synchronized
     def get_firmware_version(self):
         """
-        Query the device's firmware version.
+        Query the firmware version.
 
-        Returns:
-            int or None: The firmware version, or None if no response.
+        :returns: The firmware version, or None if no response.
         """
-        self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
         ack_event = self.ack_events[CMD_GET_FIRMWARE_VERSION]
         ack_event.clear()
+        self._send_packet(CMD_GET_FIRMWARE_VERSION, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_firmware_version ACK")
             return self.firmware_version
-        else:
-            logger.error("get_firmware_version No ACK!")
-            return None
+        logger.error("get_firmware_version No ACK!")
+        return None
 
+    def get_firmware_version_major(self):
+        """
+        Return the cached firmware major version, querying the device if needed.
+
+        Older firmware replies only with the minor version byte; those devices
+        are treated as major version 1 for backward compatibility.
+        """
+        if self.firmware_version_major is None:
+            self.get_firmware_version()
+        return self.firmware_version_major
+
+    def get_firmware_version_string(self):
+        """Return a display string such as ``V2.1`` for the cached firmware.
+
+        Format is ``V<major>.<minor>`` (minor is NOT zero-padded), e.g. major=2
+        minor=1 -> ``V2.1``. (Older builds padded the minor to two digits, which
+        rendered as the confusing ``V2.01``.)
+        """
+        major = self.firmware_version_major if self.firmware_version_major is not None else 1
+        minor = self.firmware_version_minor
+        if minor is None:
+            minor = self.firmware_version
+        if minor is None:
+            return "Unknown"
+        return f"V{major}.{minor}"
+
+    @synchronized
     def get_hardware_version(self):
         """
-        Query the device's hardware version.
+        Query the hardware version.
 
-        Returns:
-            int or None: The hardware version, or None if no response.
+        :returns: The hardware version, or None if no response.
         """
-        self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
         ack_event = self.ack_events[CMD_GET_HARDWARE_VERSION]
         ack_event.clear()
+        self._send_packet(CMD_GET_HARDWARE_VERSION, None, None)
         if ack_event.wait(self.com_timeout):
-            logger.debug("get_hardware_version ACK")
             return self.hardware_version
-        else:
-            logger.error("get_hardware_version No ACK!")
+        logger.error("get_hardware_version No ACK!")
+        return None
+
+    @synchronized
+    def get_product_type(self):
+        """
+        Query the product-type ID.
+
+        Optional command: older firmware does not respond, in which case None is
+        returned (logged at debug level, not as an error).
+
+        :returns: The product-type ID, or None if unsupported/no response.
+        """
+        ack_event = self.ack_events[CMD_GET_PRODUCT_TYPE]
+        ack_event.clear()
+        self._send_packet(CMD_GET_PRODUCT_TYPE, None, None)
+        if ack_event.wait(self.com_timeout):
+            return self.product_type
+        logger.debug("get_product_type No ACK (may be old firmware)")
+        return None
+
+    @synchronized
+    def get_product_name(self):
+        """
+        Get the product name for the connected device.
+
+        :returns: The product name (e.g. "HBP_USB2_4CH"), an "Unknown(...)" string, or None if the product type is unavailable.
+        """
+        if self.product_type is None:
+            self.product_type = self.get_product_type()
+        if self.product_type is None:
             return None
+        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+        return product_info["name"] if product_info is not None else f"Unknown({self.product_type:#02x})"
+
+    @synchronized
+    def get_max_channels(self):
+        """
+        Query the maximum channel count.
+
+        Optional command: older firmware does not respond, in which case None is
+        returned (logged at debug level, not as an error).
+
+        :returns: The maximum channel count, or None if unsupported/no response.
+        """
+        ack_event = self.ack_events[CMD_GET_MAX_CHANNELS]
+        ack_event.clear()
+        self._send_packet(CMD_GET_MAX_CHANNELS, None, None)
+        if ack_event.wait(self.com_timeout):
+            return self.max_channels
+        logger.debug("get_max_channels No ACK (may be old firmware)")
+        return None
+
+    @synchronized
+    def get_serial_no(self):
+        """
+        Query the device serial number.
+
+        :returns: The serial-number string ("N/A" if unavailable), or None if no response.
+        """
+        if self._is_legacy_v1_firmware():
+            self.serial_no = self.serial_no or "N/A"
+            return self.serial_no
+
+        ack_event = self.ack_events[CMD_GET_SERIAL_NO]
+        ack_event.clear()
+        self.serial_no = None
+        self._send_packet(CMD_GET_SERIAL_NO, None, None)
+        if ack_event.wait(self.com_timeout):
+            deadline = time.time() + max(0.2, self.com_timeout)
+            while self.serial_no is None and time.time() < deadline:
+                time.sleep(0.01)
+            return self.serial_no
+        logger.debug("get_serial_no No ACK (may be old firmware)")
+        return None
+
+
+# Disconnect every open instance on interpreter exit as a safety net for callers
+# that forget to disconnect() or use the context-manager form.
+atexit.register(SmartUSBHub._cleanup_all_instances)

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smartusbhub"
+version = "1.2.0"
+authors = [
+  { name="zhang", email="mixedsignallab@outlook.com" },
+]
+description = "A Python library for SmartUSBHub that provides per-port power and data control, voltage and current monitoring, and manual plug/unplug simulation—designed for development, testing, and device management."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*", "NOTICE*"]
+
+dependencies = [
+    "pyserial",
+]
+
+[project.optional-dependencies]
+# Extra packages used only by the bundled example scripts (e.g. the oscilloscope).
+examples = [
+    "numpy",
+    "pyqtgraph",
+    "PyQt5",
+]
+# Packages used to run the test suite.
+test = [
+    "pytest",
+    "pytest-html",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://www.mixedsignallab.com"
+Repository = "https://github.com/mixedsignal-labs/smartusbhub"
+Issues = "https://github.com/mixedsignal-labs/smartusbhub/issues"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["smartusbhub"]
