@@ -1,13 +1,4 @@
-# Core runtime dependency
+# Core SDK runtime dependency only.
+# Demo dependencies live in examples/requirements.txt.
+# Test dependencies are available through: python -m pip install ".[test]"
 pyserial
-
-# Example scripts (oscilloscope, plotting)
-numpy
-pyqtgraph
-PyQt5
-PyQt5_sip
-
-# Test suite
-pytest
-pytest-html
-pytest-cov

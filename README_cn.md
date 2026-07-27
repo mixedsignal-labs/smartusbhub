@@ -8,7 +8,7 @@
 
 **本 SDK 说明适用于**：SDK 支持的 SmartUSBHub 型号。下方产品说明书链接目前覆盖 4CH 与 7CH USB 2.0 产品。
 
-**本文档更新日期**：2026年7月24日
+**本文档更新日期**：2026年7月27日
 
 ## 简介
 
@@ -100,6 +100,8 @@ SmartUSBHub 是一系列可编程 USB 集线器，支持按通道控制电源；
 
 任选一种使用方式。
 
+需要 Python 3.7 或更高版本。
+
 ### 方法1：直接安装发布包
 
 ```shell
@@ -112,7 +114,7 @@ pip install smartusbhub
 cd smartusbhub
 python -m venv venv
 source ./venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 库目录结构如下：
@@ -122,8 +124,14 @@ pip install -r requirements.txt
 ├── README.md					# 文档
 ├── docs						# 产品指南与通信协议
 ├── examples					# 例程
-├── requirements.txt	# 安装依赖
+├── requirements.txt	# SDK 核心依赖
 └── smartusbhub.py 		# 功能源码
+```
+
+SDK 本身只依赖 `pyserial`。GUI Demo 的可选依赖单独维护，不会随 SDK 安装：
+
+```shell
+python -m pip install -r examples/requirements.txt
 ```
 
 ## 运行例程

@@ -42,7 +42,7 @@ from functools import wraps
 import serial
 import serial.tools.list_ports
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # Cross-process file lock support: prefer fcntl (Unix/Linux/macOS), fall back to
 # msvcrt (Windows). When neither is available, port locking degrades to a

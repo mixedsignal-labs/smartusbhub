@@ -1,0 +1,5 @@
+# Optional dependencies used only by the oscilloscope GUI demos.
+# They are not required by the SmartUSBHub SDK itself.
+numpy
+pyqtgraph
+PyQt5

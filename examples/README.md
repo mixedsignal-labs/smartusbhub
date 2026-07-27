@@ -24,14 +24,15 @@ pip install smartusbhub
 
 ```bash
 cd smartusbhub
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python examples/power_control_example.py
 ```
 
-GUI examples require extra packages:
+The SDK itself only installs `pyserial`. The oscilloscope GUI demos require
+separate, optional dependencies:
 
 ```bash
-pip install pyqtgraph PyQt5 numpy
+python -m pip install -r examples/requirements.txt
 ```
 
 ## Running

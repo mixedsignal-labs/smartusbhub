@@ -23,14 +23,14 @@ pip install smartusbhub
 
 ```bash
 cd smartusbhub
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python examples/power_control_example.py
 ```
 
-GUI 示例需要额外依赖：
+SDK 本身只安装 `pyserial`。示波器 GUI Demo 需要单独安装可选依赖：
 
 ```bash
-pip install pyqtgraph PyQt5 numpy
+python -m pip install -r examples/requirements.txt
 ```
 
 ## 运行

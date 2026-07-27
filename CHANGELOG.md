@@ -6,6 +6,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-27
+
+### Changed
+- Lowered the minimum supported Python version from 3.9 to 3.7. The SDK does
+  not use Python 3.9-specific language features.
+- The root `requirements.txt` now contains only the core runtime dependency,
+  `pyserial`. Optional GUI demo dependencies are isolated in
+  `examples/requirements.txt` and are absent from the package metadata.
+- Source distributions now include the documented examples and their separate
+  optional requirements file.
+- Lowered the build requirement to `setuptools>=61` while retaining both
+  `LICENSE` and `NOTICE` in built wheels.
+
 ## [1.2.0] - 2026-07-16
 
 ### Changed

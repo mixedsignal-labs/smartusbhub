@@ -8,7 +8,7 @@
 
 **This SDK reference applies to:** supported SmartUSBHub models. The product-manual links below currently cover the 4CH and 7CH USB 2.0 products.
 
-**Last updated on:** July 24, 2026
+**Last updated on:** July 27, 2026
 
 ## Introduction
 
@@ -104,6 +104,8 @@ SmartUSBHub is designed for repeatable USB control in:
 
 Choose one setup method.
 
+Python 3.7 or later is required.
+
 ### Method 1: Install via pip
 
 ```shell
@@ -116,7 +118,7 @@ pip install smartusbhub
 cd smartusbhub
 python -m venv venv
 source ./venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Library structure:
@@ -126,14 +128,15 @@ Library structure:
 ├── README.md                # Documentation
 ├── docs                     # Product guides and protocol documentation
 ├── examples                 # Runnable examples
-├── requirements.txt         # Dependency list
+├── requirements.txt         # Core SDK dependency only
 └── smartusbhub.py           # Core functionality source code
 ```
 
-GUI examples require extra packages:
+The SDK itself only requires `pyserial`. Optional GUI demo dependencies are
+kept separate and are not installed with the SDK:
 
 ```shell
-pip install pyqtgraph PyQt5 numpy
+python -m pip install -r examples/requirements.txt
 ```
 
 

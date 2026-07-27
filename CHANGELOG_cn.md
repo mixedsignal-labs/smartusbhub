@@ -6,6 +6,16 @@
 
 ## [未发布 Unreleased]
 
+## [1.2.1] - 2026-07-27
+
+### 变更
+- 最低 Python 版本由 3.9 降至 3.7；SDK 未使用 Python 3.9 专属语言特性。
+- 根目录 `requirements.txt` 现在只包含核心运行依赖 `pyserial`。GUI Demo
+  的可选依赖独立放在 `examples/requirements.txt`，且不再出现在包元数据中。
+- 源码发行包现在会包含文档中列出的 Demo 及其独立可选依赖文件。
+- 构建要求降至 `setuptools>=61`，同时确保 wheel 继续包含 `LICENSE` 和
+  `NOTICE`。
+
 ## [1.2.0] - 2026-07-16
 
 ### 变更
