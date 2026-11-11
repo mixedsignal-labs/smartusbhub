@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980" role="img" aria-labelledby="title desc">
+  <title id="title">SmartUSBHub Pro 4CH USB2.0 系统框图</title>
+  <desc id="desc">四路 VBUS 与双向 USB2 D+、D− 均由 MCU 独立控制的系统框图。</desc>
+  <defs>
+    <style>
+      text{font-family:"Source Han Sans SC","Source Sans 3",sans-serif;fill:#282828}
+      .t{font-size:22px}.m{font-size:20px}.s{font-size:16px;fill:#858b90}.xs{font-size:13px;fill:#555}.ch{font-size:12px;fill:#555}
+      .box{fill:#fff;stroke:#282828;stroke-width:1.8}
+      .minor{fill:#fafafa;stroke:#282828;stroke-width:1.3}
+      .line{fill:none;stroke:#303030;stroke-width:1.8}
+      .thin{fill:none;stroke:#8b9297;stroke-width:1.3}
+      .power{fill:none;stroke:#303030;stroke-width:2.4}
+      .dash{fill:none;stroke:#777;stroke-width:1.2;stroke-dasharray:5 4}
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#303030"/>
+    </marker>
+    <marker id="arrow-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#8b9297"/>
+    </marker>
+    <marker id="arrow-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#303030" stroke-width="1.4"/>
+    </marker>
+  </defs>
+
+  <rect x="195" y="45" width="1560" height="885" fill="#fff" stroke="#d6dade" stroke-width="1.5"/>
+  <text x="225" y="88" class="t">SMARTUSBHUB PRO 4CH USB2.0</text>
+
+  <!-- Original interface blocks: positions and sizes unchanged -->
+  <rect x="30" y="165" width="150" height="87" class="box"/>
+  <text x="105" y="202" text-anchor="middle" class="m">指令控制</text>
+  <text x="105" y="234" text-anchor="middle" class="s">USB-CDC</text>
+
+  <rect x="30" y="450" width="150" height="87" class="box"/>
+  <text x="105" y="482" text-anchor="middle" class="m">上行数据</text>
+  <text x="105" y="508" text-anchor="middle" class="m">接口</text>
+  <text x="105" y="530" text-anchor="middle" class="s">Type-C</text>
+
+  <rect x="30" y="646" width="150" height="87" class="box"/>
+  <text x="105" y="684" text-anchor="middle" class="m">辅助供电</text>
+  <text x="105" y="716" text-anchor="middle" class="s">Type-C 电源输入</text>
+
+  <!-- Original logic/data blocks: positions and sizes unchanged -->
+  <rect x="525" y="150" width="285" height="118" class="box"/>
+  <text x="668" y="203" text-anchor="middle" class="t">MCU / 端口控制</text>
+  <text x="668" y="236" text-anchor="middle" class="s">逐端口控制 / 监测</text>
+  <path d="M180 190H525" class="line"/>
+
+  <rect x="585" y="320" width="255" height="430" class="box"/>
+  <text x="713" y="542" text-anchor="middle" class="t">4 口 USB2 集线器</text>
+  <path d="M180 493H501M519 493H585" class="line"/>
+
+  <!-- Control routes are kept above the modules and do not cross each other -->
+  <text x="875" y="125" class="s">VBUS 控制 / 电压电流检测 ×4</text>
+  <path d="M720 150V130H1200V329" class="thin" marker-start="url(#arrow-grey)" marker-end="url(#arrow-grey)"/>
+  <text x="1098" y="105" class="s">数据开关控制 ×4</text>
+  <path d="M650 150V110H1395V247" class="thin" marker-end="url(#arrow-grey)"/>
+
+  <rect x="1312" y="247" width="166" height="61" class="minor"/>
+  <text x="1395" y="272" text-anchor="middle" class="m">4× USB2 数据</text>
+  <text x="1395" y="296" text-anchor="middle" class="m">开关</text>
+  <path d="M1395 308V329" class="thin"/>
+
+  <!-- Four downstream rows -->
+  <text x="1605" y="266" text-anchor="middle" class="m">TYPE-A</text>
+  <text x="1605" y="290" text-anchor="middle" class="m">端口</text>
+
+  <!-- Per-channel VBUS and USB2 data paths -->
+  <path d="M1105 349H1125" class="power"/>
+  <text x="1435" y="342" text-anchor="middle" class="ch">VBUS_P1</text>
+  <path d="M1275 349H1515" class="power" marker-end="url(#arrow)"/>
+  <path d="M840 388H1097" class="line" marker-start="url(#arrow-open)"/>
+  <path d="M1113 388H1320" class="line"/>
+  <path d="M1470 388H1515" class="line" marker-end="url(#arrow-open)"/>
+  <path d="M1105 454H1125" class="power"/>
+  <text x="1435" y="447" text-anchor="middle" class="ch">VBUS_P2</text>
+  <path d="M1275 454H1515" class="power" marker-end="url(#arrow)"/>
+  <path d="M840 493H1097" class="line" marker-start="url(#arrow-open)"/>
+  <path d="M1113 493H1320" class="line"/>
+  <path d="M1470 493H1515" class="line" marker-end="url(#arrow-open)"/>
+  <path d="M1105 559H1125" class="power"/>
+  <text x="1435" y="552" text-anchor="middle" class="ch">VBUS_P3</text>
+  <path d="M1275 559H1515" class="power" marker-end="url(#arrow)"/>
+  <path d="M840 598H1097" class="line" marker-start="url(#arrow-open)"/>
+  <path d="M1113 598H1320" class="line"/>
+  <path d="M1470 598H1515" class="line" marker-end="url(#arrow-open)"/>
+  <path d="M1105 664H1125" class="power"/>
+  <text x="1435" y="657" text-anchor="middle" class="ch">VBUS_P4</text>
+  <path d="M1275 664H1515" class="power" marker-end="url(#arrow)"/>
+  <path d="M840 703H1320" class="line" marker-start="url(#arrow-open)"/>
+  <path d="M1470 703H1515" class="line" marker-end="url(#arrow-open)"/>
+
+  <rect x="1125" y="337" width="150" height="25" class="minor"/><text x="1200" y="354" text-anchor="middle" class="ch">CH1 VBUS开关 + V/I检测</text>
+  <rect x="1320" y="376" width="150" height="25" class="minor"/><text x="1395" y="393" text-anchor="middle" class="ch">CH1 D+ / D− 开关</text>
+  <rect x="1125" y="442" width="150" height="25" class="minor"/><text x="1200" y="459" text-anchor="middle" class="ch">CH2 VBUS开关 + V/I检测</text>
+  <rect x="1320" y="481" width="150" height="25" class="minor"/><text x="1395" y="498" text-anchor="middle" class="ch">CH2 D+ / D− 开关</text>
+  <rect x="1125" y="547" width="150" height="25" class="minor"/><text x="1200" y="564" text-anchor="middle" class="ch">CH3 VBUS开关 + V/I检测</text>
+  <rect x="1320" y="586" width="150" height="25" class="minor"/><text x="1395" y="603" text-anchor="middle" class="ch">CH3 D+ / D− 开关</text>
+  <rect x="1125" y="652" width="150" height="25" class="minor"/><text x="1200" y="669" text-anchor="middle" class="ch">CH4 VBUS开关 + V/I检测</text>
+  <rect x="1320" y="691" width="150" height="25" class="minor"/><text x="1395" y="708" text-anchor="middle" class="ch">CH4 D+ / D− 开关</text>
+
+  <rect x="1515" y="330" width="180" height="78" class="box"/><text x="1605" y="377" text-anchor="middle" class="m">P1</text>
+  <rect x="1515" y="435" width="180" height="78" class="box"/><text x="1605" y="482" text-anchor="middle" class="m">P2</text>
+  <rect x="1515" y="540" width="180" height="78" class="box"/><text x="1605" y="587" text-anchor="middle" class="m">P3</text>
+  <rect x="1515" y="645" width="180" height="78" class="box"/><text x="1605" y="692" text-anchor="middle" class="m">P4</text>
+
+  <!-- Original power-input modules and rail: positions and sizes unchanged -->
+  <text x="225" y="308" class="s">5 V 电源输入路径</text>
+
+  <path d="M180 472H285" class="power" marker-end="url(#arrow)"/>
+  <rect x="285" y="446" width="190" height="52" class="minor"/>
+  <text x="380" y="468" text-anchor="middle" class="xs">单向隔离二极管</text>
+  <text x="380" y="487" text-anchor="middle" class="xs">+ 4 A 保险丝</text>
+
+  <path d="M180 230H285" class="power" marker-end="url(#arrow)"/>
+  <rect x="285" y="204" width="190" height="52" class="minor"/>
+  <text x="380" y="226" text-anchor="middle" class="xs">单向隔离二极管</text>
+  <text x="380" y="245" text-anchor="middle" class="xs">+ 4 A 保险丝</text>
+
+  <!-- AUX is a direct connection, so no one-way arrow is shown -->
+  <path d="M180 690H285" class="power"/>
+  <rect x="285" y="664" width="190" height="52" class="minor"/>
+  <text x="380" y="686" text-anchor="middle" class="xs">直连 · 无板载保护</text>
+  <text x="380" y="705" text-anchor="middle" class="xs">最大 5 A（Type-C 接口额定）</text>
+
+  <path d="M475 230H510V690M475 472H510M475 690H510" class="power"/>
+  <circle cx="510" cy="278" r="5" fill="#303030"/>
+  <circle cx="510" cy="472" r="5" fill="#303030"/>
+  <text x="958" y="242" text-anchor="middle" class="m">5V_SYS</text>
+  <text x="958" y="264" text-anchor="middle" class="xs">I总 = I_DATA + I_CMD + I_AUX</text>
+  <path d="M510 278H1105" class="power"/>
+  <path d="M1105 278V664" class="power"/>
+  <circle cx="1105" cy="349" r="5" fill="#303030"/>
+  <circle cx="1105" cy="454" r="5" fill="#303030"/>
+  <circle cx="1105" cy="559" r="5" fill="#303030"/>
+
+  <rect x="1120" y="797" width="575" height="86" fill="#fff" stroke="#8b9297" stroke-width="1.2"/>
+  <text x="1140" y="824" class="xs">上行数据口：单向隔离二极管 + 4 A 保险丝</text>
+  <text x="1140" y="846" class="xs">指令控制口：单向隔离二极管 + 4 A 保险丝</text>
+  <text x="1140" y="868" class="xs">辅助供电口：无板载保护；最大 5 A（Type-C 接口额定值）。</text>
+  <text x="225" y="905" class="s">可用总输出电流取决于所有已连接电源、线缆、连接器及保护路径。</text>
+</svg>

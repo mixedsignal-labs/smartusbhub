@@ -1,15 +1,12 @@
-##
-# @file __init__.py
-# @brief Public package interface for the SmartUSBHub library.
-# @copyright (c) 2026 MixedSignalLab
-# @license Apache-2.0
-# @author zhang <mixedsignallab@outlook.com>
-# @website https://www.mixedsignallab.com
-#
-# Re-exports the SmartUSBHub driver class, its exception hierarchy and the
-# operating-mode constants so callers can `from smartusbhub import ...` directly.
+# Copyright (c) 2026 MixedSignalLab
+# SPDX-License-Identifier: Apache-2.0
+# Author: zhang <mixedsignallab@outlook.com>
+# Website: https://www.mixedsignallab.com
+# See LICENSE for license terms and NOTICE for attribution.
 
-__version__ = "1.2.0"
+"""Public package interface for the SmartUSBHub library."""
+
+__version__ = "1.3.0"
 
 # Prefer a relative import (source checkout); fall back to absolute (installed
 # as a top-level module via py-modules).
@@ -18,9 +15,18 @@ try:
         SmartUSBHub,
         SmartUSBHubError,
         PortBusyError,
+        PortPermissionError,
         DeviceConnectionError,
         FeatureNotSupportedError,
+        FirmwareUpdateRecommendedWarning,
+        DeviceAuthenticationError,
+        DeviceAuthenticationCommunicationError,
+        DeviceAuthenticationRejectedError,
+        AuthenticationNotSupportedError,
+        AuthenticationTrustError,
+        AuthenticationDependencyError,
         PRODUCT_TYPE_TABLE,
+        load_trusted_issuers,
         OPERATE_MODE_NORMAL, OPERATE_MODE_INTERLOCK,
     )
 except ImportError:
@@ -28,9 +34,18 @@ except ImportError:
         SmartUSBHub,
         SmartUSBHubError,
         PortBusyError,
+        PortPermissionError,
         DeviceConnectionError,
         FeatureNotSupportedError,
+        FirmwareUpdateRecommendedWarning,
+        DeviceAuthenticationError,
+        DeviceAuthenticationCommunicationError,
+        DeviceAuthenticationRejectedError,
+        AuthenticationNotSupportedError,
+        AuthenticationTrustError,
+        AuthenticationDependencyError,
         PRODUCT_TYPE_TABLE,
+        load_trusted_issuers,
         OPERATE_MODE_NORMAL, OPERATE_MODE_INTERLOCK,
     )
 
@@ -39,8 +54,17 @@ __all__ = [
     'SmartUSBHub',
     'SmartUSBHubError',
     'PortBusyError',
+    'PortPermissionError',
     'DeviceConnectionError',
     'FeatureNotSupportedError',
+    'FirmwareUpdateRecommendedWarning',
+    'DeviceAuthenticationError',
+    'DeviceAuthenticationCommunicationError',
+    'DeviceAuthenticationRejectedError',
+    'AuthenticationNotSupportedError',
+    'AuthenticationTrustError',
+    'AuthenticationDependencyError',
     'PRODUCT_TYPE_TABLE',
+    'load_trusted_issuers',
     'OPERATE_MODE_NORMAL', 'OPERATE_MODE_INTERLOCK',
 ]

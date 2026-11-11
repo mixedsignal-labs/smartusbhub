@@ -3,3 +3,7 @@ include CHANGELOG_cn.md
 include README_cn.md
 include requirements.txt
 recursive-include examples *.md *.py *.txt
+
+prune test
+prune tests
+global-exclude *.docx

@@ -14,6 +14,7 @@ SmartUSBHub is a family of programmable USB hubs with per-channel power control.
 | --- | --- | ---: | --- | --- | --- |
 | SmartUSBHub Pro 4CH USB2.0 | `HBP_USB2_4CH`, `HBP_USB2_4CH_PSU` | 4 | USB 2.0 High-Speed | [User Guide](./products/usb2_4p/user_guide.md) | [Technical Specification](./products/usb2_4p/datasheet.md) |
 | SmartUSBHub Pro 7CH USB2.0 | `HBP_USB2_7CH`, `HBP_USB2_7CH_ADV` | 7 | USB 2.0 High-Speed | [User Guide](./products/usb2_7p/user_guide.md) | [Technical Specification](./products/usb2_7p/datasheet.md) |
+| SmartUSBHub Pro 4CH USB3.0 RevB | `HBP_USB3_4CH` | 4 | USB 3.0 | [SDK guide (Chinese)](./products/usb3_4p/sdk_cn.md) | — |
 
 ## Capability Matrix
 

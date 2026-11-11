@@ -11,6 +11,8 @@ in its top-of-file docstring.
 - A SmartUSBHub connected over USB. The examples auto-detect it via
   `SmartUSBHub.scan_and_connect()`; no port name is required.
 - Make sure the serial port is not held open by another program.
+- The SDK itself only requires `pyserial`; the examples have no extra
+  dependencies.
 
 Choose one setup method:
 
@@ -25,48 +27,32 @@ pip install smartusbhub
 ```bash
 cd smartusbhub
 python -m pip install -r requirements.txt
-python examples/power_control_example.py
+python examples/quick_start.py
 ```
 
-The SDK itself only installs `pyserial`. The oscilloscope GUI demos require
-separate, optional dependencies:
+## Quick start
+
+Run the examples in this order:
+
+| Step | Example | What it shows | Guide |
+| --- | --- | --- | --- |
+| 1 | [quick_start.py](./quick_start.py) | Print a full device report (identity, capabilities, runtime status), then demonstrate channel power control: single channel, all channels at once, interlock mode, and device address get/set | [en](./docs/quick_start.md) / [cn](./docs/quick_start_cn.md) |
+| 2 | [power_measurement_oneshot.py](./power_measurement_oneshot.py) | Continuously print per-port voltage/current via V2 request/response measurement; `--csv` export, `--interval-ms` | [en](./docs/power_measurement_oneshot.md) / [cn](./docs/power_measurement_oneshot_cn.md) |
+| 3 | [multi_device_channel_control.py](./multi_device_channel_control.py) | Discover and control several hubs at once | [en](./docs/multi_device_channel_control.md) / [cn](./docs/multi_device_channel_control_cn.md) |
 
 ```bash
-python -m pip install -r examples/requirements.txt
+python examples/quick_start.py
+python examples/power_measurement_oneshot.py
+python examples/multi_device_channel_control.py
 ```
 
-## Running
+## Extras
 
-Run any script from the package root or from this source checkout:
+Additional demos for less common needs, in [extras/](./extras/):
 
-```bash
-python examples/power_control_example.py
-```
-
-## Basics
-
-| Example | What it shows |
-| --- | --- |
-| [device_report.py](./device_report.py) | Read the hub's identity + runtime status; `--info-only`, `--json`, `--port` |
-| [power_control_example.py](./power_control_example.py) | Turn channels on/off, individually and in groups; interlock mode |
-| [setting_example.py](./setting_example.py) | Read device info; configure default states, address, operate mode and buttons; factory reset |
-| [cycle_all_channels.py](./cycle_all_channels.py) | Power-cycle every controllable channel in sequence |
-| [set_default_power_dataline_on.py](./set_default_power_dataline_on.py) | Configure power-on defaults (power ON, USB2 data line connected) |
-
-## Monitoring (models with voltage/current sensing)
-
-| Example | What it shows |
-| --- | --- |
-| [advanced/power_measurement_oneshot.py](./advanced/power_measurement_oneshot.py) | Continuously print per-port voltage/current via V2 request/response |
-| [advanced/power_measurement_stream.py](./advanced/power_measurement_stream.py) | Continuously print per-port voltage/current via the V3 measurement stream |
-| [advanced/oscilloscope.py](./advanced/oscilloscope.py) | Real-time GUI plot of voltage/current (needs PyQt5 + pyqtgraph) |
-| [advanced/oscilloscope_stream.py](./advanced/oscilloscope_stream.py) | Same plot, driven by the V3 measurement streaming protocol |
-| [advanced/oc_monitor_usb2_7p.py](./advanced/oc_monitor_usb2_7p.py) | Poll overcurrent active/latch status on USB2 7P models only |
-
-## Advanced
-
-| Example | What it shows |
-| --- | --- |
-| [advanced/dataline_control_example.py](./advanced/dataline_control_example.py) | Disconnect/reconnect a channel's USB2.0 data line while power stays on |
-| [advanced/user_callback_example.py](./advanced/user_callback_example.py) | Register callbacks invoked when a command is acknowledged |
-| [advanced/multi_device_channel_control.py](./advanced/multi_device_channel_control.py) | Discover and control several hubs at once |
+| Example | What it shows | Guide |
+| --- | --- | --- |
+| [extras/dataline_control.py](./extras/dataline_control.py) | Disconnect/reconnect a channel's data line while power stays on | [en](./docs/extras_dataline_control.md) / [cn](./docs/extras_dataline_control_cn.md) |
+| [extras/power_on_defaults.py](./extras/power_on_defaults.py) | Configure power-on defaults: power ON, data line connected | [en](./docs/extras_power_on_defaults.md) / [cn](./docs/extras_power_on_defaults_cn.md) |
+| [extras/aging_cycle.py](./extras/aging_cycle.py) | Power-cycle every channel N times - burn-in / production test | [en](./docs/extras_aging_cycle.md) / [cn](./docs/extras_aging_cycle_cn.md) |
+| [extras/alerts.py](./extras/alerts.py) | Configure an overcurrent alert rule, subscribe and watch events | [en](./docs/extras_alerts.md) / [cn](./docs/extras_alerts_cn.md) |

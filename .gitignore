@@ -1,6 +1,7 @@
 .venv
 venv
 windows_venv
+.pdf-deps/
 .DS_Store
 *.pyc
 *.pyo

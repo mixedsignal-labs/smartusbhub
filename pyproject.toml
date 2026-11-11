@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smartusbhub"
-version = "1.2.1"
+version = "1.3.0"
 authors = [
-  { name="zhang", email="mixedsignallab@outlook.com" },
+  { name="MixedSignal Lab", email="mixedsignallab@outlook.com" },
 ]
 description = "A Python library for SmartUSBHub that provides per-port power and data control, voltage and current monitoring, and manual plug/unplug simulation—designed for development, testing, and device management."
 readme = "README.md"
@@ -22,17 +22,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+auth = [
+    "cryptography>=3.4",
+]
 # Packages used to run the test suite.
 test = [
     "pytest",
     "pytest-html",
     "pytest-cov",
+    "cryptography>=3.4",
 ]
 
 [project.urls]
 Homepage = "https://www.mixedsignallab.com"
 Repository = "https://github.com/mixedsignal-labs/smartusbhub"
 Issues = "https://github.com/mixedsignal-labs/smartusbhub/issues"
+CLI = "https://www.usbctrl.com"
 
 [tool.setuptools]
 include-package-data = true

@@ -90,10 +90,12 @@ The DATA port carries USB traffic between downstream devices and the host. The C
 
 ### 3.4 Voltage and Current Measurement
 
-| Measurement | Range | Resolution | Accuracy |
+| Measurement | Range | Effective resolution | Measurement accuracy |
 | --- | --- | --- | --- |
-| VBUS voltage | 0–5.5 V per channel | 1.48 mV | ±(0.91% × reading + 36 mV) |
-| Output current | 0–4.0 A per channel | 1.15 mA | ±(2.5% × reading + 50 mA) |
+| VBUS voltage | 0–5.5 V/channel | 10 mV (typical) | Status monitoring only; not a precision measurement |
+| Current | Approx. 30 mA–4.0 A/channel | 10 mA (typical) | Uncalibrated; trend monitoring only |
+
+Voltage and current data are reported in units of 1 mV and 1 mA, respectively; the reporting unit does not represent effective measurement resolution. Current below approximately 30 mA may be reported as zero. Measurements are affected by the voltage reference, shunt resistor, amplifier error, temperature, and component variation. They are not intended for metrology or precision power measurements; use a calibrated external instrument when an accurate determination is required.
 
 ## 4 Electrical Specifications
 
@@ -103,7 +105,7 @@ The DATA port carries USB traffic between downstream devices and the host. The C
 Only connect a regulated 5 V DC supply to any power input. No input may exceed 5.5 V. Never use a PD trigger, boost cable or other method to apply 9 V, 12 V, 15 V or 20 V to AUX POWER.
 :::
 
-| Parameter | Minimum | Typical | Maximum | Unit | Notes |
+| Parameter | Min. | Typ. | Max. | Unit | Notes |
 | --- | ---: | ---: | ---: | --- | --- |
 | 5 V input voltage | 4.75 | 5.00 | 5.25 | V | Recommended operating range |
 | Absolute maximum input | 0 | - | 5.5 | V | Applies to all power inputs |

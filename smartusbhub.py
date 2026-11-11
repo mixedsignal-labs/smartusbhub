@@ -1,53 +1,35 @@
-"""
-High-level driver for controlling a Smart USB Hub over a UART serial link.
+# Copyright (c) 2026 MixedSignalLab
+# SPDX-License-Identifier: Apache-2.0
+# Author: zhang <mixedsignallab@outlook.com>
+# Website: https://www.mixedsignallab.com
+# See LICENSE for license terms and NOTICE for attribution.
 
-Project website: https://www.mixedsignallab.com
+"""Control SmartUSBHub devices through the USB CDC command port.
 
-The SmartUSBHub class provides robust per-port control of power and data
-connections, voltage/current monitoring, configuration of default states,
-and factory reset. It is intended for automated test systems and hardware
-development workflows.
-
-**Wire protocol**
-
-Three framing variants share the same serial channel; frames are
-distinguished by their start-of-frame (SOF) bytes:
-
-- **V1** (6 bytes): ``0x55`` ``0x5A`` ``CMD`` ``CHANNEL`` ``VALUE`` ``CHECKSUM``,
-  where ``CHECKSUM`` = (CMD + CHANNEL + VALUE) & 0xFF. Used for most set/get
-  commands. ``CHANNEL`` is a bitmask (bit0 = channel 1, bit1 = channel 2, ...).
-- **V2** (7 bytes): ``0x55`` ``0x5A`` ``CMD`` ``CHANNEL`` ``VALUE0`` ``VALUE1``
-  ``CHECKSUM``. Used for 16-bit payloads (voltage/current) and for the
-  enable/value pairs of the default power/dataline commands.
-- **V3** (>=10 bytes): ``0x55`` ``0xAB`` ``0xCD`` ``0xEF`` SOF magic, followed by
-  ``CMD``, ``FLAGS``, a little-endian 16-bit ``LENGTH``, a little-endian 16-bit
-  CRC16 (poly 0x8005, init 0xFFFF, computed with the CRC field zeroed), and a
-  variable-length payload. Used for batch measurements and measurement
-  streaming. Frames whose ``FLAGS`` carry ``V3_FLAG_STREAM`` are unsolicited
-  notifications and are not acknowledged by the host.
-
-Refer to the product documentation shipped with your release package for the
-authoritative command reference.
+See README.md for usage and docs/protocol.md for frame formats and commands.
 """
 
 import os
 import time
 import atexit
+import hashlib
+import json
+import copy
 import logging
+import warnings
 import weakref
 import tempfile
 import threading
+from collections import deque
 from functools import wraps
 
 import serial
 import serial.tools.list_ports
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
-# Cross-process file lock support: prefer fcntl (Unix/Linux/macOS), fall back to
-# msvcrt (Windows). When neither is available, port locking degrades to a
-# process-local check only. Both flags are always defined so either may be
-# tested unconditionally.
+# Detect file-lock backends; Windows uses a named mutex in _PortLock.acquire.
+# Define both flags so either can be checked regardless of the available backend.
 HAS_FCNTL = False
 HAS_MSVCRT = False
 try:
@@ -59,6 +41,19 @@ except ImportError:
         HAS_MSVCRT = True
     except ImportError:
         pass
+class LegacyAPIWarning(FutureWarning):
+    """Visible migration notice for a supported, previously published API."""
+
+
+def _warn_legacy_api(name, replacement):
+    warnings.warn(f"{name} is a legacy API. Migrate to {replacement}.",
+                  LegacyAPIWarning, stacklevel=3)
+
+
+class FirmwareUpdateRecommendedWarning(UserWarning):
+    """Non-blocking notice: old firmware remains usable through compatibility APIs."""
+
+
 class SmartUSBHubError(Exception):
     """
     Base class for all errors raised by this library.
@@ -75,6 +70,18 @@ class PortBusyError(SmartUSBHubError, ValueError):
     previously caught the ``ValueError`` raised on a busy port.
     """
     pass
+
+
+class PortPermissionError(SmartUSBHubError, PermissionError):
+    """
+    Raised when the operating system denies access to a serial port.
+
+    Kept distinct from :class:`PortBusyError` so command-line applications can
+    provide an actionable permissions hint instead of incorrectly reporting
+    that another process owns the port.
+    """
+    pass
+
 
 class DeviceConnectionError(SmartUSBHubError):
     """
@@ -93,17 +100,47 @@ class FeatureNotSupportedError(SmartUSBHubError, ValueError):
     pass
 
 
+class DeviceAuthenticationError(SmartUSBHubError):
+    """Base class for optional genuine-device authentication failures."""
+    pass
+
+
+class DeviceAuthenticationCommunicationError(DeviceAuthenticationError):
+    """The authentication exchange timed out or returned a malformed response."""
+    pass
+
+
+class DeviceAuthenticationRejectedError(DeviceAuthenticationError):
+    """The certificate or challenge proof could not establish device authenticity."""
+    pass
+
+
+class AuthenticationNotSupportedError(DeviceAuthenticationError):
+    """The connected firmware does not implement genuine-device authentication."""
+    pass
+
+
+class AuthenticationTrustError(DeviceAuthenticationError):
+    """The caller did not provide a usable trusted issuer public key."""
+    pass
+
+
+class AuthenticationDependencyError(DeviceAuthenticationError, ImportError):
+    """The optional ``cryptography`` package needed for verification is missing."""
+    pass
+
+
 # --- Command codes -----------------------------------------------------------
-CMD_GET_CHANNEL_POWER_STATUS        = 0x00  # query channel VBUS power state
-CMD_SET_CHANNEL_POWER               = 0x01  # set channel VBUS power state
-CMD_SET_CHANNEL_POWER_INTERLOCK     = 0x02  # select one powered channel, or clear interlock
-CMD_GET_CHANNEL_VOLTAGE             = 0x03  # query one channel voltage sample
-CMD_GET_CHANNEL_CURRENT             = 0x04  # query one channel current sample
+CMD_GET_CHANNEL_POWER_STATUS        = 0x00
+CMD_SET_CHANNEL_POWER               = 0x01
+CMD_SET_CHANNEL_POWER_INTERLOCK     = 0x02  # select one powered channel, or turn all off
+CMD_GET_CHANNEL_VOLTAGE             = 0x03  # V2 reply in mV
+CMD_GET_CHANNEL_CURRENT             = 0x04  # V2 reply in mA
 CMD_SET_CHANNEL_DATALINE            = 0x05  # set USB2 D+/D- data-line switch state
 CMD_GET_CHANNEL_DATALINE_STATUS     = 0x08  # query USB2 D+/D- data-line switch state
 
-CMD_SET_BUTTON_CONTROL              = 0x09  # enable or disable front-panel button control
-CMD_GET_BUTTON_CONTROL_STATUS       = 0x0A  # query front-panel button-control state
+CMD_SET_BUTTON_CONTROL              = 0x09
+CMD_GET_BUTTON_CONTROL_STATUS       = 0x0A
 
 CMD_SET_DEFAULT_POWER_STATUS        = 0x0B  # set boot/default VBUS power state
 CMD_GET_DEFAULT_POWER_STATUS        = 0x0C  # query boot/default VBUS power state
@@ -113,38 +150,129 @@ CMD_GET_DEFAULT_DATALINE_STATUS     = 0x0E  # query boot/default USB2 data-line 
 CMD_SET_AUTO_RESTORE                = 0x0F  # enable or disable power-loss auto-restore
 CMD_GET_AUTO_RESTORE_STATUS         = 0x10  # query power-loss auto-restore state
 
-CMD_SET_OPERATE_MODE                = 0x06  # set device operating mode
-CMD_GET_OPERATE_MODE                = 0x07  # query device operating mode
+CMD_SET_OPERATE_MODE                = 0x06
+CMD_GET_OPERATE_MODE                = 0x07
 
-CMD_SET_DEVICE_ADDRESS              = 0x11  # set multi-hub device address
-CMD_GET_DEVICE_ADDRESS              = 0x12  # query multi-hub device address
+CMD_SET_DEVICE_ADDRESS              = 0x11
+CMD_GET_DEVICE_ADDRESS              = 0x12
 
-CMD_GET_CHANNEL_MEASUREMENTS        = 0x1A  # V3 query/stream: voltage/current samples
+CMD_GET_CHANNEL_MEASUREMENTS        = 0x1A  # V3 query/stream: voltage/current/power samples
+CMD_LAB_RECOVERY                    = 0x27  # USB3 RevB opt-in laboratory lease
+CMD_LAB_CAPTURE                     = 0x28  # USB3 RevB coherent snapshot batches
+CMD_MEASUREMENT_FILTER              = 0x29  # 0=instantaneous, 1=measurement hardware internal avg8
+CMD_MEASUREMENT_RATE                = 0x2A  # Device-declared uint16 LE output sample rate
+CMD_ALERT_CONFIG                    = 0x30
+CMD_GET_ALERT_STATUS                = 0x31
+CMD_CLEAR_ALERT_LATCH               = 0x32
+CMD_ALERT_EVENT_SUBSCRIPTION        = 0x33
+CMD_ALERT_EVENT                     = 0x34
+CMD_RESET_PROTECTION_TRIP           = 0x35
+CMD_GET_CHANNEL_POWER_MASK          = 0x36  # V1: channel=low8, value=high8
+CMD_GET_CHANNEL_USB2_DATALINE_MASK   = 0x37
+CMD_GET_CHANNEL_USB3_DATALINE_MASK   = 0x38
+CMD_GET_DEFAULT_POWER_MASK          = 0x39  # V1 request, V2 reply, two bits/channel
+CMD_GET_DEFAULT_USB2_DATALINE_MASK   = 0x3A
+CMD_GET_DEFAULT_USB3_DATALINE_MASK   = 0x3B
+ALERT_TYPES = ("overcurrent", "undercurrent", "overvoltage", "undervoltage", "overpower")
+CMD_SET_DEFAULT_USB3_DATALINE_STATUS = 0x2D
+CMD_GET_DEFAULT_USB3_DATALINE_STATUS = 0x2E
+CMD_RESET_HUB                       = 0x2C  # V3 empty request/reply; capability-gated
+CMD_GET_CAPABILITIES                = 0x2B  # current V3: implemented capabilities as UTF-8 JSON
 CMD_GET_CHANNEL_OC_STATUS           = 0x1B  # query/unsolicited: channel=active_mask, value=latch_mask
 CMD_CLEAR_CHANNEL_OC_LATCH          = 0x1C  # clear the sticky OC latch for a channel mask
 CMD_IDENTIFY_DEVICE                 = 0x1D  # quick blink status LED to locate device
 CMD_SET_CHANNEL_NAME                = 0x1E  # V3 payload: [channel(1-based), utf8 name]
 CMD_GET_CHANNEL_NAME                = 0x1F  # V3 payload: request/response [channel(1-based), utf8 name]
 CMD_SET_DEVICE_ALIAS                = 0x20  # V3 payload: utf8 alias
+CMD_SET_CHANNEL_USB3_DATALINE       = 0x15
+CMD_GET_CHANNEL_USB3_DATALINE_STATUS = 0x16
+CMD_SET_UPSTREAM_HOST               = 0x22
+CMD_GET_UPSTREAM_HOST               = 0x23
+CMD_DEBUG_LOG                   = 0x24
+CMD_GET_DEBUG_TEMPERATURE           = 0x25
+CMD_SET_DEBUG_LOG_ENABLE            = 0x26
 CMD_GET_DEVICE_ALIAS                = 0x21  # V3 payload response: utf8 alias
-CMD_REBOOT_MCU                      = 0xF7  # reboot the device MCU
-CMD_GET_SERIAL_NO                   = 0xF9  # query device serial number
-CMD_GET_PRODUCT_TYPE                = 0xF0  # query product-type code
-CMD_GET_MAX_CHANNELS                = 0xF1  # query maximum supported channel count
+CMD_AUTH_GET_CERTIFICATE            = 0xD0  # V3 response: status + compact certificate
+CMD_AUTH_CHALLENGE                  = 0xD1  # V3 request: nonce[32], response: status + r||s
+CMD_REBOOT_MCU                      = 0xF7
+CMD_GET_SERIAL_NO                   = 0xF9
+CMD_GET_PRODUCT_TYPE                = 0xF0
+CMD_GET_MAX_CHANNELS                = 0xF1
+CMD_GET_PROTOCOL_FORMAT             = 0xF2  # V1 bootstrap: reply channel=3, data=header length
 CMD_FACTORY_RESET                   = 0xFC  # restore persistent settings to factory defaults
-CMD_GET_FIRMWARE_VERSION            = 0xFD  # query firmware version
-CMD_GET_HARDWARE_VERSION            = 0xFE  # query hardware version
+CMD_GET_FIRMWARE_VERSION            = 0xFD
+CMD_GET_HARDWARE_VERSION            = 0xFE
 
 # --- V3 framing constants ----------------------------------------------------
 V3_MAGIC                            = (0x55, 0xAB, 0xCD, 0xEF)  # 4-byte SOF magic
-V3_HEADER_LEN                       = 10   # 4 SOF + cmd + flags + length(2) + crc(2)
-V3_MAX_FRAME_LEN                    = 64
-V3_MAX_DATA_LEN                     = V3_MAX_FRAME_LEN - V3_HEADER_LEN
+V3_LEGACY_HEADER_LEN                = 10
+V3_HEADER_LEN                       = 16   # request ID u16, status u8, reserved[3]
+V3_MAX_DATA_LEN                     = 1024
+V3_MAX_FRAME_LEN                    = V3_HEADER_LEN + V3_MAX_DATA_LEN
 V3_FLAG_STREAM                      = 0x01
+V3_FLAG_RESPONSE                    = 0x02
+V3_FLAG_REQUEST                     = 0x04
+V3_ASSEMBLY_TIMEOUT                 = 0.25
 V3_MEAS_FLAG_FORCE_SAMPLE           = 0x01
 V3_MEAS_FLAG_STREAM_ENABLE          = 0x02
 V3_MEAS_FLAG_STREAM_DISABLE         = 0x04
 V3_STATUS_OK                        = 0x00
+V3_STATUS_UNSUPPORTED_COMMAND       = 0x01
+V3_STATUS_UNSUPPORTED_FEATURE       = 0x02
+V3_STATUS_INVALID_ARGUMENT          = 0x03
+V3_STATUS_BUSY                      = 0x04
+V3_STATUS_NOT_READY                 = 0x05
+V3_STATUS_IO_ERROR                  = 0x06
+V3_STATUS_INTERNAL_ERROR            = 0x07
+
+# --- Genuine authentication -------------------------------------------------
+AUTH_STATUS_OK                      = 0x00
+AUTH_STATUS_UNSUPPORTED             = 0x01
+AUTH_STATUS_INVALID_REQUEST         = 0x02
+AUTH_STATUS_NOT_PROVISIONED         = 0x03
+AUTH_STATUS_INVALID_PROVISIONING    = 0x04
+AUTH_STATUS_SIGNING_FAILED          = 0x05
+
+AUTH_CERTIFICATE_SIZE               = 125
+AUTH_NONCE_SIZE                     = 32
+AUTH_SIGNATURE_SIZE                 = 64
+AUTH_CHALLENGE_TIMEOUT_MIN           = 6.0  # Allow sufficient time for device-side processing.
+AUTH_CHALLENGE_DOMAIN               = b"MSL-SMARTUSBHUB-AUTH-V1"
+AUTH_CERT_MAGIC                     = b"MSL1"
+AUTH_CERT_VERSION                   = 1
+AUTH_ALGORITHM_P256_SHA256          = 1
+
+
+def load_trusted_issuers(path):
+    """Load the public official-app issuer mapping generated by ``auth_keygen.py``.
+
+    The JSON file is public material, not a secret. It has the shape
+    ``{"format_version": 1, "issuers": {"1": {"public_key_pem": "..."}}}``.
+    The returned mapping can be passed directly to :meth:`authenticate_device`.
+    """
+    try:
+        with open(os.fspath(path), "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError, TypeError) as exc:
+        raise AuthenticationTrustError(f"Cannot load authentication trust store: {path}") from exc
+    if document.get("format_version") != 1 or not isinstance(document.get("issuers"), dict):
+        raise AuthenticationTrustError("Authentication trust store format is invalid.")
+    trusted = {}
+    for issuer_id, record in document["issuers"].items():
+        try:
+            numeric_id = int(issuer_id)
+        except (TypeError, ValueError) as exc:
+            raise AuthenticationTrustError(f"Invalid issuer ID in trust store: {issuer_id}") from exc
+        if isinstance(record, dict):
+            material = record.get("public_key_pem")
+        else:
+            material = record
+        if not isinstance(material, str) or not material.strip():
+            raise AuthenticationTrustError(f"Issuer {numeric_id} has no public key.")
+        trusted[numeric_id] = material
+    if not trusted:
+        raise AuthenticationTrustError("Authentication trust store contains no issuers.")
+    return trusted
 
 # --- Operating modes ---------------------------------------------------------
 # Channels are addressed by 1-based number throughout the public API (e.g.
@@ -153,81 +281,111 @@ V3_STATUS_OK                        = 0x00
 OPERATE_MODE_NORMAL = 0
 OPERATE_MODE_INTERLOCK = 1
 
-# Product capability table keyed by product-type ID.
-#
-# Each entry describes hardware capabilities. A True value does not by itself
-# guarantee that this SDK version exposes a public control method for that
-# capability (USB3/ILIM are currently metadata-only):
-# - ``name``: short product identifier
-# - ``channels``: number of channels
-# - ``description``: human-readable description
-# - ``enable_adc``: voltage/current monitoring supported
-# - ``enable_usb2_data_switch``: USB2.0 data-line switching supported
-# - ``enable_usb3_data_switch``: USB3.0 data-line switching supported
-# - ``enable_ilim_switch``: current-limit / slow-fast charge switching supported
-# - ``ack_timeout``: per-command ACK timeout in seconds
-PRODUCT_TYPE_TABLE = {
+# Product identity/display metadata. New products need no capability entry here.
+PRODUCT_CATALOG = {
     0x00: {
         "name": "HBP_USB2_4CH",
         "channels": 4,
-        "description": "USB2.0 4-channel hub",
-        "enable_adc": True,
-        "enable_usb2_data_switch": True,
-        "enable_usb3_data_switch": False,
-        "enable_ilim_switch": False,
-        "ack_timeout": 0.1,
+        "description": "USB2.0 4-channel hub"
     },
     0x01: {
-        "name": "HBP_USB2_2CH",
+        "name": "HBL_USB2_2CH",
         "channels": 2,
-        "description": "USB2.0 2-channel hub",
-        "enable_adc": False,
-        "enable_usb2_data_switch": False,
-        "enable_usb3_data_switch": False,
-        "enable_ilim_switch": False,
-        "ack_timeout": 0.1,
+        "description": "USB2.0 2-channel hub"
     },
     0x02: {
         "name": "HBP_USB2_7CH",
         "channels": 7,
-        "description": "USB2.0 7-channel hub",
-        "enable_adc": True,
-        "enable_usb2_data_switch": True,
-        "enable_usb3_data_switch": False,
-        "enable_ilim_switch": False,
-        "ack_timeout": 0.1,
+        "description": "USB2.0 7-channel hub"
     },
     0x03: {
         "name": "HBP_USB2_7CH_ADV",
         "channels": 7,
-        "description": "USB2.0 7-channel hub with INA3221 voltage/current monitoring",
-        "enable_adc": True,
-        "enable_usb2_data_switch": True,
-        "enable_usb3_data_switch": False,
-        "enable_ilim_switch": False,
-        "ack_timeout": 0.1,
+        "description": "USB2.0 7-channel hub with multichannel measurement unit voltage/current monitoring"
     },
     0x04: {
         "name": "HBP_USB3_4CH",
         "channels": 4,
-        "description": "USB3.0 4-channel hub",
-        "enable_adc": False,
-        "enable_usb2_data_switch": True,
-        "enable_usb3_data_switch": True,
-        "enable_ilim_switch": True,
-        "ack_timeout": 0.1,
+        "description": "USB3.0 4-channel RevB hub with hardware measurement unit monitoring and dual-host selection"
     },
     0x05: {
         "name": "HBL_USB2_4CH",
         "channels": 4,
-        "description": "USB2.0 4-channel power-control hub with overcurrent reporting",
+        "description": "USB2.0 4-channel power-control hub"
+    }
+}
+
+# Frozen compatibility knowledge for firmware that cannot declare capabilities.
+# Do not add new products/features here; implement GET_CAPABILITIES in firmware.
+_LEGACY_PRODUCT_CAPABILITIES = {
+    0x00: {
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.1
+    },
+    0x01: {
         "enable_adc": False,
         "enable_usb2_data_switch": False,
         "enable_usb3_data_switch": False,
         "enable_ilim_switch": False,
-        "enable_overcurrent": True,
-        "ack_timeout": 0.1,
+        "ack_timeout": 0.1
     },
+    # Legacy standard 7CH firmware used 0x03 only after detecting all multichannel measurement units.
+    0x02: {
+        "enable_adc": False,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "enable_overcurrent": True,
+        "ack_timeout": 0.1
+    },
+    0x03: {
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "enable_overcurrent": True,
+        "ack_timeout": 0.1
+    },
+    # Historical measurement hardware/capture traffic needs more control-response headroom.
+    0x04: {
+        "enable_upstream_host_switch": True,
+        "enable_adc": True,
+        "enable_usb2_data_switch": True,
+        "enable_usb3_data_switch": True,
+        "enable_ilim_switch": False,
+        "ack_timeout": 0.5
+    },
+    0x05: {
+        "enable_adc": False,
+        "enable_usb2_data_switch": False,
+        "enable_usb3_data_switch": False,
+        "enable_ilim_switch": False,
+        "enable_overcurrent": False,
+        "ack_timeout": 0.1
+    }
+}
+
+# Backward-compatible public view for older callers of get_product_info().
+# Connected-device feature decisions never read enable_* from this merged view.
+PRODUCT_TYPE_TABLE = {
+    key: dict(info, **_LEGACY_PRODUCT_CAPABILITIES.get(key, {}))
+    for key, info in PRODUCT_CATALOG.items()
+}
+
+_CAPABILITY_NAMES = (
+    "power", "measurement", "board_temperature", "usb2_data_switch",
+    "usb3_data_switch", "upstream_host_switch", "overcurrent",
+    "current_limit_switch", "identify", "device_alias", "channel_names",
+    "button_control", "auto_restore", "interlock", "authentication", "debug_log", "alerts",
+)
+_FEATURE_CAPABILITY = {
+    "adc": "measurement", "usb2_data_switch": "usb2_data_switch",
+    "usb3_data_switch": "usb3_data_switch", "upstream_host_switch": "upstream_host_switch",
+    "ilim_switch": "current_limit_switch", "overcurrent": "overcurrent",
+    "board_temperature": "board_temperature",
 }
 
 # Library logging follows the standard practice of attaching only a NullHandler;
@@ -235,23 +393,13 @@ PRODUCT_TYPE_TABLE = {
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-# When False, the synchronized decorator becomes a no-op.
-#
-# Intended for tests that need to exercise behaviour without the per-instance
-# command lock. Leave True in production.
+# Tests may disable the per-instance command lock; leave enabled in production.
 ENABLE_SYNC_LOCK = True
 
 
 def synchronized(method):
     """
-    Decorator that serializes access to a SmartUSBHub method via the instance lock.
-
-    When ``ENABLE_SYNC_LOCK`` is True the wrapped method acquires ``self.lock`` for
-    its whole duration; when False it runs without locking.
-
-    :param method: The instance method to wrap.
-
-    :returns: The wrapped method.
+    Hold ``self.lock`` for the whole method when ``ENABLE_SYNC_LOCK`` is True.
     """
 
     @wraps(method)
@@ -265,18 +413,15 @@ def synchronized(method):
 
 class _Codec:
     """
-    Pure wire-protocol codec for the SmartUSBHub serial link (no I/O, no state).
-
-    All framing knowledge — the V1/V2/V3 layouts, the CRC16, the V1 checksum and
-    the per-command V1-vs-V2 sizing — lives here in one place, so the send path,
-    the receive loop's frame-sizing and the parser can never disagree. Every method
-    is a pure function of its arguments and is unit-testable without a device.
+    Stateless V1/V2/V3 encoding and parsing, with shared checksum and sizing rules.
     """
 
     # Reply frames that use the 7-byte V2 framing (two payload bytes); every other
     # V1/V2 reply uses the 6-byte V1 framing. This is the per-command sizing table
     # the parser and the receive loop both consult.
     V2_REPLY_COMMANDS = (
+        CMD_GET_DEFAULT_POWER_MASK, CMD_GET_DEFAULT_USB2_DATALINE_MASK,
+        CMD_GET_DEFAULT_USB3_DATALINE_MASK,
         CMD_GET_CHANNEL_VOLTAGE, CMD_GET_CHANNEL_CURRENT,
         CMD_SET_DEFAULT_POWER_STATUS, CMD_SET_DEFAULT_DATALINE_STATUS,
         CMD_GET_DEFAULT_POWER_STATUS, CMD_GET_DEFAULT_DATALINE_STATUS,
@@ -298,15 +443,10 @@ class _Codec:
     @staticmethod
     def encode_v1v2(cmd, channel_mask, data):
         """
-        Build a V1/V2 frame ``55 5A | cmd | mask | data... | checksum``.
+        Build a V1/V2 bytearray ``55 5A | cmd | channel | data... | checksum``.
 
-        :param cmd: Command byte.
-
-        :param channel_mask: Channel-mask byte (the caller derives it).
-
-        :param data: Iterable of payload bytes following the mask.
-
-        :returns: The frame bytearray.
+        ``channel_mask`` is the command-specific channel byte, not always a mask.
+        ``data`` contains the payload bytes following it.
         """
         payload = [channel_mask] + list(data)
         packet = bytearray([0x55, 0x5A, cmd])
@@ -315,47 +455,42 @@ class _Codec:
         return packet
 
     @staticmethod
-    def encode_v3(cmd, payload=b""):
-        """
-        Build a V3 frame ``55 AB CD EF | cmd | flags | len(2) | crc16(2) | payload``.
+    def encode_v3(cmd, payload=b"", *, header_len=V3_HEADER_LEN,
+                  request_id=1, flags=V3_FLAG_REQUEST, status=V3_STATUS_OK):
+        """Encode a V3 frame.
 
-        Accepts payload as bytes, bytearray, list of ints, or a single int.
-
-        :param cmd: Command byte.
-
-        :param payload: Payload bytes (or list/int).
-
-        :returns: The frame bytearray.
-
-        :raises ValueError: If the payload exceeds ``V3_MAX_DATA_LEN.``
+        CRC covers the whole header and payload, with bytes 8:10 zeroed.
+        No inference from payload bytes or firmware version is performed.
         """
         if payload is None:
             payload = b""
-        elif isinstance(payload, list):
-            payload = bytes(payload)
-        elif not isinstance(payload, (bytes, bytearray)):
+        elif isinstance(payload, int):
             payload = bytes([payload])
         payload = bytes(payload)
-
+        if header_len not in (V3_LEGACY_HEADER_LEN, V3_HEADER_LEN):
+            raise ValueError("Unsupported V3 header length")
         if len(payload) > V3_MAX_DATA_LEN:
             raise ValueError(f"V3 payload too large: {len(payload)} > {V3_MAX_DATA_LEN}")
-
-        # Header: [0-3] SOF magic, [4] cmd, [5] flags, [6-7] length, [8-9] crc16.
-        packet = bytearray([
-            0x55, 0xAB, 0xCD, 0xEF,
-            cmd & 0xFF,
-            0x00,
-            len(payload) & 0xFF,
-            (len(payload) >> 8) & 0xFF,
-            0x00, 0x00,
-        ]) + payload
+        if flags not in (V3_FLAG_REQUEST, V3_FLAG_RESPONSE, V3_FLAG_STREAM):
+            raise ValueError("Exactly one V3 message type is required")
+        if not 0 <= request_id <= 65535 or not 0 <= status <= 255:
+            raise ValueError("Invalid V3 request ID or status")
+        if flags == V3_FLAG_REQUEST and (not request_id or status):
+            raise ValueError("Requests require a nonzero ID and zero status")
+        if flags == V3_FLAG_STREAM and (request_id or status):
+            raise ValueError("Events require zero ID and status")
+        wire_flags = flags if header_len == V3_HEADER_LEN else (flags & V3_FLAG_STREAM)
+        packet = bytearray([0x55, 0xAB, 0xCD, 0xEF, cmd & 255, wire_flags,
+                            len(payload) & 255, len(payload) >> 8, 0, 0])
+        if header_len == V3_HEADER_LEN:
+            packet.extend([request_id & 255, request_id >> 8, status, 0, 0, 0])
+        packet.extend(payload)
         crc = _Codec.crc16(packet)
-        packet[8] = crc & 0xFF
-        packet[9] = (crc >> 8) & 0xFF
+        packet[8], packet[9] = crc & 255, crc >> 8
         return packet
 
     @staticmethod
-    def parse_frame(data):
+    def parse_frame(data, *, header_len=V3_HEADER_LEN):
         """
         Parse one frame from the front of ``data`` (V1/V2/V3).
 
@@ -363,48 +498,47 @@ class _Codec:
 
         :returns: Tuple (cmd, channel, value, length) on success, else None when the
             buffer holds only a partial frame or the frame is invalid. For V3 frames,
-            channel is 0 and value is a dict {"v3", "stream", "payload"}.
+            channel is 0 and value includes "v3", "stream", "payload";
+            current V3 additionally supplies "request_id", "status", "flags".
         """
         if len(data) < 6:
             return None
 
-        # V3 protocol: 4-byte SOF magic 0x55 0xAB 0xCD 0xEF.
-        if data[0] == 0x55 and data[1] == 0xAB:
-            if len(data) < V3_HEADER_LEN:
+        # Header format is selected once by the V1 bootstrap, never guessed.
+        if data[:2] == bytes(V3_MAGIC[:2]):
+            if header_len not in (V3_LEGACY_HEADER_LEN, V3_HEADER_LEN):
                 return None
-            if data[2] != 0xCD or data[3] != 0xEF:
-                logger.debug(f"V3 magic mismatch: {data[2]:02X} {data[3]:02X}")
+            if len(data) < header_len or data[:4] != bytes(V3_MAGIC):
                 return None
-
-            # Header: [0-3] magic, [4] cmd, [5] flags, [6-7] length, [8-9] crc16.
-            cmd = data[4]
-            flags = data[5]
+            cmd, flags = data[4], data[5]
             data_length = data[6] | (data[7] << 8)
             if data_length > V3_MAX_DATA_LEN:
-                logger.debug(f"Invalid V3 payload length: {data_length} > {V3_MAX_DATA_LEN}")
                 return None
-            received_crc16 = data[8] | (data[9] << 8)
-
-            total_length = V3_HEADER_LEN + data_length
+            total_length = header_len + data_length
             if len(data) < total_length:
                 return None
-
+            received_crc16 = data[8] | (data[9] << 8)
             crc_data = bytearray(data[:total_length])
-            crc_data[8] = 0   # zero the CRC field before verification
-            crc_data[9] = 0
-            calculated_crc16 = _Codec.crc16(crc_data)
-            if calculated_crc16 != received_crc16:
-                logger.debug(f"Invalid V3 CRC16: calculated={calculated_crc16:04X}, "
-                             f"received={received_crc16:04X}")
+            crc_data[8:10] = b"\0\0"
+            if _Codec.crc16(crc_data) != received_crc16:
                 return None
-
-            data_value = {
-                "v3": True,
-                "stream": bool(flags & V3_FLAG_STREAM),
-                "payload": bytes(data[V3_HEADER_LEN:total_length]),
-            }
-            logger.debug(f"Received V3 frame: cmd={cmd:04X}, length={data_length}")
-            return (cmd, 0, data_value, total_length)
+            result = {"v3": True, "stream": bool(flags & V3_FLAG_STREAM),
+                      "payload": bytes(data[header_len:total_length])}
+            if header_len == V3_HEADER_LEN:
+                request_id = data[10] | (data[11] << 8)
+                status = data[12]
+                if flags not in (V3_FLAG_REQUEST, V3_FLAG_RESPONSE, V3_FLAG_STREAM):
+                    return None
+                if any(data[13:16]):
+                    return None
+                if flags == V3_FLAG_REQUEST and (not request_id or status):
+                    return None
+                if flags == V3_FLAG_STREAM and (request_id or status):
+                    return None
+                result.update(request_id=request_id, status=status, flags=flags)
+            elif flags & ~V3_FLAG_STREAM:
+                return None
+            return cmd, 0, result, total_length
 
         # V1/V2 protocol: SOF 0x55 0x5A.
         if data[0] != 0x55 or data[1] != 0x5A:
@@ -433,28 +567,116 @@ class _Codec:
         return (cmd, channel, value, 6)
 
 
+class _FrameReader:
+    """Incremental V1/V2/V3 framing with an idle timeout for partial frames."""
+
+    def __init__(self, header_len=V3_HEADER_LEN, timeout=V3_ASSEMBLY_TIMEOUT):
+        self.header_len = header_len
+        self.timeout = timeout
+        self.buffer = bytearray()
+        self.last_byte_at = None
+        self.discarded = 0
+
+    def feed(self, data=b"", now=None):
+        now = time.monotonic() if now is None else now
+        if self.buffer and self.last_byte_at is not None and now - self.last_byte_at > self.timeout:
+            # Drop the stale start, then search retained bytes for a later frame.
+            del self.buffer[0]
+            self.discarded += 1
+            self.last_byte_at = now
+        if data:
+            self.buffer.extend(data)
+            self.last_byte_at = now
+        frames = []
+        while len(self.buffer) >= 2:
+            b = self.buffer
+            if b[:2] == bytes(V3_MAGIC[:2]):
+                if len(b) < 4:
+                    break
+                if b[:4] != bytes(V3_MAGIC):
+                    del b[0]; self.discarded += 1
+                    continue
+                if len(b) < 10:
+                    break
+                length = b[6] | (b[7] << 8)
+                if length <= V3_MAX_DATA_LEN and len(b) < self.header_len + length:
+                    break
+            elif b[:2] == b"\x55\x5a":
+                if len(b) < 3:
+                    break
+                required = 7 if b[2] in _Codec.V2_REPLY_COMMANDS else 6
+                if len(b) < required:
+                    break
+            else:
+                del b[0]; self.discarded += 1
+                continue
+            parsed = _Codec.parse_frame(b, header_len=self.header_len)
+            if parsed is None:
+                del b[0]; self.discarded += 1
+                continue
+            frames.append(parsed)
+            del b[:parsed[3]]
+        return frames
+
+
+class _CommandEvent(threading.Event):
+    """Keep existing boolean APIs while distinguishing a rejection from timeout."""
+
+    def __init__(self):
+        super().__init__()
+        self.protocol_status = V3_STATUS_OK
+        self.response_ok = True
+        self.on_timeout = None
+
+    def clear(self):
+        self.on_timeout = None
+        self.protocol_status = V3_STATUS_OK
+        self.response_ok = True
+        super().clear()
+
+    def wait(self, timeout=None):
+        completed = super().wait(timeout)
+        if not completed and self.on_timeout is not None:
+            self.on_timeout()
+        return completed and self.protocol_status == V3_STATUS_OK and self.response_ok
+
+
+def detect_v3_header_length(port, timeout=0.3):
+    """Read-only V1 discovery for raw tools that exclusively own ``port``.
+
+    Devices without current V3 discovery use the compatibility path.
+    Use before starting a stream. Normal SDK connections negotiate internally.
+    """
+    port.write(_Codec.encode_v1v2(CMD_GET_PROTOCOL_FORMAT, 0, [0]))
+    reader = _FrameReader(header_len=V3_LEGACY_HEADER_LEN)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for cmd, channel, value, _ in reader.feed(port.read(max(1, port.in_waiting))):
+            if cmd == CMD_GET_PROTOCOL_FORMAT:
+                if (channel, value) == (3, V3_HEADER_LEN):
+                    return V3_HEADER_LEN
+                if (channel, value) == (255, 255):
+                    return V3_LEGACY_HEADER_LEN
+                raise DeviceConnectionError("Unsupported protocol discovery response")
+    return V3_LEGACY_HEADER_LEN
+
+
 class _PortLock:
     """
-    Cross-process exclusive lock for a serial port, backed by an OS file lock.
+    Coordinate serial-port ownership across cooperating processes.
 
-    Uses ``fcntl`` on Unix/macOS and ``msvcrt`` on Windows; where neither exists the
-    lock degrades to success (the caller's in-process port registry still prevents
-    double-open within one process). A lock file left behind by a dead process is
-    detected via its recorded PID and reaped, so a crashed owner never wedges a port
-    permanently. State and behaviour are identical to the former ``SmartUSBHub``
-    classmethods; this just isolates the OS-specific locking in one testable unit.
+    Windows uses a named mutex and falls back to OS serial-port exclusivity if
+    mutex creation is unavailable. Other platforms use the available file-lock
+    backend, normally ``fcntl`` on Unix/macOS. Without a backend, only the
+    caller's in-process port registry provides this coordination check.
     """
 
-    _locks = {}        # {port: open lock-file handle}
+    _locks = {}        # {port: ("mutex", HANDLE) on Windows, file handle elsewhere}
     _lock_dir = None   # lock-file directory (lazily created)
 
     @classmethod
     def _get_lock_dir(cls):
-        """
-        Return the directory used to store per-port lock files, creating it if needed.
-
-        :returns: Absolute path to the lock-file directory.
-        """
+        """Return the absolute lock-file directory, creating it if needed."""
         if cls._lock_dir is None:
             cls._lock_dir = os.path.join(tempfile.gettempdir(), 'smartusbhub_locks')
             os.makedirs(cls._lock_dir, exist_ok=True)
@@ -462,18 +684,12 @@ class _PortLock:
 
     @classmethod
     def _check_process_exists(cls, pid):
-        """
-        Check whether a process with the given PID currently exists.
-
-        :param pid: Process ID to probe.
-
-        :returns: True if the process exists, False otherwise.
-        """
+        """Return whether the OS probe confirms that ``pid`` exists."""
         try:
             if os.name == 'nt':
                 import ctypes
                 kernel32 = ctypes.windll.kernel32
-                handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_INFORMATION
+                handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
                 if handle:
                     kernel32.CloseHandle(handle)
                     return True
@@ -485,11 +701,7 @@ class _PortLock:
 
     @classmethod
     def _clear_stale_lock(cls, lock_file_path):
-        """
-        Remove a lock file if it is owned by a process that no longer exists.
-
-        :param lock_file_path: Path to the candidate lock file.
-        """
+        """Try to remove a lock file whose recorded owner appears to have exited."""
         if not os.path.exists(lock_file_path):
             return
         try:
@@ -504,19 +716,68 @@ class _PortLock:
     @classmethod
     def acquire(cls, port):
         """
-        Acquire a non-blocking cross-process file lock for a serial port.
+        Try to acquire the platform's non-blocking port coordination lock.
 
-        Stale lock files left behind by dead processes are detected and removed.
-        On platforms without file-locking support this degrades to success.
+        File-lock contention triggers a stale-PID cleanup attempt and one retry.
+        Windows mutex setup failures fall back to OS serial-port exclusivity.
 
         :param port: Serial port name.
 
-        :returns: True if the lock was acquired (or locking is unsupported), else False.
+        :returns: True if acquired or using a fallback, False on contention or error.
         """
         if port in cls._locks:
             return True
 
         safe_port_name = port.replace('/', '_').replace('\\', '_').replace(':', '_')
+
+        # msvcrt.locking() is unreliable inside some PyInstaller onefile builds
+        # on Windows and can raise EINVAL for an otherwise valid lock file. A
+        # named kernel mutex provides the exact lifetime semantics needed here:
+        # it exists while this process keeps the handle open and is reclaimed
+        # automatically if the process exits or crashes.
+        if os.name == 'nt':
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                kernel32.CreateMutexW.argtypes = (
+                    wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+                kernel32.CreateMutexW.restype = wintypes.HANDLE
+                kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                kernel32.CloseHandle.restype = wintypes.BOOL
+
+                mutex_name = f'Local\\SmartUSBHub_Port_{safe_port_name.upper()}'
+                # CreateMutexW documents ERROR_ALREADY_EXISTS via last-error.
+                # Clear any stale thread-local value first so a previous Win32
+                # call cannot make a newly created mutex look pre-existing.
+                ctypes.set_last_error(0)
+                handle = kernel32.CreateMutexW(None, False, mutex_name)
+                if not handle:
+                    error_code = ctypes.get_last_error()
+                    logger.warning(
+                        "Failed to create Windows port mutex %s: winerror=%s; "
+                        "falling back to the OS serial-port exclusivity check",
+                        mutex_name, error_code)
+                    # Never reject a usable COM port because the optional
+                    # coordination layer failed. Windows CreateFile (used by
+                    # pyserial) still opens COM ports exclusively and remains
+                    # the authoritative busy-port check.
+                    return True
+                if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+                    kernel32.CloseHandle(handle)
+                    logger.warning("Port %s is locked by another process", port)
+                    return False
+
+                cls._locks[port] = ('mutex', handle)
+                logger.debug("Acquired Windows mutex %s for port %s", mutex_name, port)
+                return True
+            except Exception as e:
+                logger.warning(
+                    "Windows mutex unavailable for port %s: %r; falling back "
+                    "to the OS serial-port exclusivity check", port, e)
+                return True
+
         lock_file_path = os.path.join(cls._get_lock_dir(), f'{safe_port_name}.lock')
 
         if not HAS_FCNTL and not HAS_MSVCRT:
@@ -525,7 +786,7 @@ class _PortLock:
             return True
 
         for attempt in (0, 1):
-            # On the second attempt the lock file has just been cleared as stale.
+            # Retry once after attempting stale-lock cleanup; the file may remain.
             try:
                 lock_file = open(lock_file_path, 'a+')
                 try:
@@ -560,14 +821,29 @@ class _PortLock:
 
     @classmethod
     def release(cls, port):
-        """
-        Release the cross-process file lock held for a serial port.
-
-        :param port: Serial port name.
-        """
-        lock_file = cls._locks.pop(port, None)
-        if lock_file is None:
+        """Release the held mutex or file lock for ``port``, if any."""
+        lock_handle = cls._locks.pop(port, None)
+        if lock_handle is None:
             return
+        if isinstance(lock_handle, tuple) and lock_handle[0] == 'mutex':
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                kernel32.CloseHandle.restype = wintypes.BOOL
+                if not kernel32.CloseHandle(lock_handle[1]):
+                    logger.error(
+                        "Failed to release Windows mutex for port %s: winerror=%s",
+                        port, ctypes.get_last_error())
+                else:
+                    logger.debug("Released Windows mutex for port %s", port)
+            except Exception as e:
+                logger.error("Failed to release Windows mutex for port %s: %r", port, e)
+            return
+
+        lock_file = lock_handle
         try:
             if HAS_FCNTL:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -582,7 +858,8 @@ class _PortLock:
 
 class SmartUSBHub:
     """
-    High-level interface to an industrial Smart USB Hub over UART.
+    High-level interface to an industrial Smart USB Hub over its USB CDC
+    serial port.
 
     Provides per-port control of power and data connections, voltage/current
     monitoring, default-state configuration and factory reset. Suitable for
@@ -593,24 +870,23 @@ class SmartUSBHub:
     .. code-block:: python
 
        with SmartUSBHub(port) as hub:
-       hub.set_channel_power(1, state=1)
+           hub.set_channel_power(1, state=1)
     """
 
     # Process-local registry of open ports and their device addresses. Used to
-    # detect double-open within a process; the cross-process file lock lives in
+    # detect double-open within a process; cross-process coordination lives in
     # ``_PortLock``.
+    _lifecycle_lock = threading.RLock()
     _connected_ports = set()
     _connected_addresses = {}        # {port: address}
     _instances = weakref.WeakSet()   # live instances, for atexit cleanup
 
     @classmethod
     def _acquire_port_lock(cls, port):
-        """Acquire the cross-process lock for ``port``. See ``_PortLock.acquire``."""
         return _PortLock.acquire(port)
 
     @classmethod
     def _release_port_lock(cls, port):
-        """Release the cross-process lock for ``port``. See ``_PortLock.release``."""
         return _PortLock.release(port)
 
     @classmethod
@@ -624,15 +900,28 @@ class SmartUSBHub:
 
     # Commands that the device acknowledges and that the host may wait on.
     _ACK_COMMANDS = (
+        CMD_GET_DEFAULT_POWER_MASK, CMD_GET_DEFAULT_USB2_DATALINE_MASK,
+        CMD_GET_DEFAULT_USB3_DATALINE_MASK,
+        CMD_GET_CHANNEL_POWER_MASK, CMD_GET_CHANNEL_USB2_DATALINE_MASK,
+        CMD_GET_CHANNEL_USB3_DATALINE_MASK,
         CMD_GET_OPERATE_MODE, CMD_SET_OPERATE_MODE,
         CMD_SET_CHANNEL_POWER, CMD_GET_CHANNEL_POWER_STATUS,
         CMD_SET_CHANNEL_POWER_INTERLOCK,
         CMD_GET_CHANNEL_VOLTAGE, CMD_GET_CHANNEL_CURRENT,
         CMD_GET_CHANNEL_MEASUREMENTS,
+        CMD_LAB_CAPTURE, CMD_MEASUREMENT_FILTER,
+        CMD_MEASUREMENT_RATE, CMD_GET_CAPABILITIES, CMD_RESET_HUB,
+        CMD_SET_DEFAULT_USB3_DATALINE_STATUS, CMD_GET_DEFAULT_USB3_DATALINE_STATUS,
+        CMD_ALERT_CONFIG, CMD_GET_ALERT_STATUS, CMD_CLEAR_ALERT_LATCH,
+        CMD_ALERT_EVENT_SUBSCRIPTION, CMD_RESET_PROTECTION_TRIP,
         CMD_GET_CHANNEL_OC_STATUS, CMD_CLEAR_CHANNEL_OC_LATCH,
         CMD_IDENTIFY_DEVICE,
         CMD_SET_CHANNEL_NAME, CMD_GET_CHANNEL_NAME,
         CMD_SET_DEVICE_ALIAS, CMD_GET_DEVICE_ALIAS,
+        CMD_SET_UPSTREAM_HOST, CMD_GET_UPSTREAM_HOST,
+        CMD_SET_DEBUG_LOG_ENABLE, CMD_GET_DEBUG_TEMPERATURE,
+        CMD_SET_CHANNEL_USB3_DATALINE, CMD_GET_CHANNEL_USB3_DATALINE_STATUS,
+        CMD_AUTH_GET_CERTIFICATE, CMD_AUTH_CHALLENGE,
         CMD_SET_CHANNEL_DATALINE, CMD_GET_CHANNEL_DATALINE_STATUS,
         CMD_SET_BUTTON_CONTROL, CMD_GET_BUTTON_CONTROL_STATUS,
         CMD_SET_DEFAULT_POWER_STATUS, CMD_GET_DEFAULT_POWER_STATUS,
@@ -640,13 +929,28 @@ class SmartUSBHub:
         CMD_SET_AUTO_RESTORE, CMD_GET_AUTO_RESTORE_STATUS,
         CMD_SET_DEVICE_ADDRESS, CMD_GET_DEVICE_ADDRESS,
         CMD_REBOOT_MCU, CMD_GET_PRODUCT_TYPE, CMD_GET_MAX_CHANNELS,
-        CMD_GET_SERIAL_NO, CMD_FACTORY_RESET,
+        CMD_GET_SERIAL_NO, CMD_FACTORY_RESET, CMD_GET_PROTOCOL_FORMAT,
         CMD_GET_FIRMWARE_VERSION, CMD_GET_HARDWARE_VERSION,
     )
 
     # Wire framing tables live on the codec; alias here so the receive loop's
     # frame-sizing (``self._V2_REPLY_COMMANDS``) reads the same single source.
     _V2_REPLY_COMMANDS = _Codec.V2_REPLY_COMMANDS
+
+    _STATUS_MASK_QUERIES = {
+        CMD_GET_CHANNEL_POWER_MASK: (CMD_GET_CHANNEL_POWER_STATUS, "channel_power_status"),
+        CMD_GET_CHANNEL_USB2_DATALINE_MASK: (CMD_GET_CHANNEL_DATALINE_STATUS, "channel_dataline_status"),
+        CMD_GET_CHANNEL_USB3_DATALINE_MASK: (CMD_GET_CHANNEL_USB3_DATALINE_STATUS, "channel_usb3_dataline_status"),
+    }
+
+    _DEFAULT_MASK_QUERIES = {
+        CMD_GET_DEFAULT_POWER_MASK: (
+            CMD_GET_DEFAULT_POWER_STATUS, "channel_default_power_flag", "channel_default_power_status"),
+        CMD_GET_DEFAULT_USB2_DATALINE_MASK: (
+            CMD_GET_DEFAULT_DATALINE_STATUS, "channel_default_dataline_flag", "channel_default_dataline_status"),
+        CMD_GET_DEFAULT_USB3_DATALINE_MASK: (
+            CMD_GET_DEFAULT_USB3_DATALINE_STATUS, "channel_default_usb3_data_flag", "channel_default_usb3_data_status"),
+    }
 
     def __init__(self, port):
         """
@@ -668,27 +972,32 @@ class SmartUSBHub:
         self.port = port
         self.name = f"smarthub_id:{port.split('/')[-1]}"
 
-        if port in SmartUSBHub._connected_ports:
-            raise PortBusyError(
-                f"Port {port} is already in use by another SmartUSBHub instance. "
-                f"Disconnect the existing instance first or use a different port.")
-
-        if not self._acquire_port_lock(port):
-            raise PortBusyError(
-                f"Port {port} is already in use by another process. "
-                f"Disconnect the existing connection first or use a different port.")
-
-        try:
-            self.ser = serial.Serial(port, 115200, timeout=0.5)
-            SmartUSBHub._connected_ports.add(port)
-            SmartUSBHub._instances.add(self)
-        except serial.SerialException as e:
-            self._release_port_lock(port)
-            msg = str(e).lower()
-            if "could not open port" in msg or "access is denied" in msg:
+        with self._lifecycle_lock:
+            if port in SmartUSBHub._connected_ports:
                 raise PortBusyError(
-                    f"Port {port} is already in use. Disconnect the existing connection first.")
-            raise
+                    f"Port {port} is already in use by another SmartUSBHub instance. "
+                    f"Disconnect the existing instance first or use a different port.")
+
+            if not self._acquire_port_lock(port):
+                raise PortBusyError(
+                    f"Port {port} is already in use by another process. "
+                    f"Disconnect the existing connection first or use a different port.")
+
+            try:
+                self.ser = serial.Serial(port, 115200, timeout=0.5)
+                SmartUSBHub._connected_ports.add(port)
+                SmartUSBHub._instances.add(self)
+            except serial.SerialException as e:
+                self._release_port_lock(port)
+                msg = str(e).lower()
+                if "permission denied" in msg or "operation not permitted" in msg:
+                    raise PortPermissionError(
+                        f"Permission denied while opening port {port}.")
+                if ("resource busy" in msg or "device or resource busy" in msg
+                        or "access is denied" in msg):
+                    raise PortBusyError(
+                        f"Port {port} is already in use. Disconnect the existing connection first.")
+                raise
 
         # Default ACK timeout; refined per product model once the type is known.
         self.com_timeout = 0.1
@@ -696,8 +1005,12 @@ class SmartUSBHub:
 
         # One ACK Event per command; the receive thread sets it when a matching
         # frame arrives and the calling thread waits on it.
-        self.ack_events = {cmd: threading.Event() for cmd in self._ACK_COMMANDS}
+        self.ack_events = {cmd: _CommandEvent() for cmd in self._ACK_COMMANDS}
         self.callbacks = {cmd: None for cmd in self.ack_events}
+        self.callbacks[CMD_DEBUG_LOG] = None
+        self.callbacks[CMD_ALERT_EVENT] = None
+        self._alert_replies = {}
+        self.last_alert_event = None
 
         # Maps an incoming command code to the handler that updates cached state.
         self._frame_handlers = {
@@ -709,12 +1022,26 @@ class SmartUSBHub:
             CMD_GET_CHANNEL_VOLTAGE: self._handle_get_channel_voltage,
             CMD_GET_CHANNEL_CURRENT: self._handle_get_channel_current,
             CMD_GET_CHANNEL_MEASUREMENTS: self._handle_get_channel_measurements,
+            CMD_LAB_CAPTURE: self._handle_capture,
+            CMD_MEASUREMENT_FILTER: self._handle_measurement_filter,
+            CMD_MEASUREMENT_RATE: self._handle_measurement_rate,
+            CMD_GET_CAPABILITIES: self._handle_capabilities,
+            CMD_SET_DEFAULT_USB3_DATALINE_STATUS: self._handle_default_usb3_response,
+            CMD_GET_DEFAULT_USB3_DATALINE_STATUS: self._handle_default_usb3_response,
+            CMD_ALERT_CONFIG: self._handle_alert_response,
+            CMD_GET_ALERT_STATUS: self._handle_alert_response,
+            CMD_CLEAR_ALERT_LATCH: self._handle_alert_response,
+            CMD_ALERT_EVENT_SUBSCRIPTION: self._handle_alert_response,
+            CMD_RESET_PROTECTION_TRIP: self._handle_alert_response,
+            CMD_ALERT_EVENT: self._handle_alert_event,
             CMD_SET_CHANNEL_DATALINE: self._handle_set_channel_dataline,
             CMD_IDENTIFY_DEVICE: self._handle_identify_device,
             CMD_SET_CHANNEL_NAME: self._handle_channel_name,
             CMD_GET_CHANNEL_NAME: self._handle_channel_name,
             CMD_SET_DEVICE_ALIAS: self._handle_device_alias,
             CMD_GET_DEVICE_ALIAS: self._handle_device_alias,
+            CMD_AUTH_GET_CERTIFICATE: self._handle_auth_certificate,
+            CMD_AUTH_CHALLENGE: self._handle_auth_challenge,
             CMD_GET_CHANNEL_DATALINE_STATUS: self._handle_get_channel_dataline,
             CMD_SET_BUTTON_CONTROL: self._handle_set_button_control,
             CMD_GET_BUTTON_CONTROL_STATUS: self._handle_get_button_control,
@@ -726,6 +1053,10 @@ class SmartUSBHub:
             CMD_GET_AUTO_RESTORE_STATUS: self._handle_get_auto_restore_status,
             CMD_GET_OPERATE_MODE: self._handle_get_operate_mode,
             CMD_SET_OPERATE_MODE: self._handle_set_operate_mode,
+            CMD_SET_CHANNEL_USB3_DATALINE: self._handle_usb3_dataline,
+            CMD_GET_CHANNEL_USB3_DATALINE_STATUS: self._handle_usb3_dataline,
+            CMD_SET_UPSTREAM_HOST: self._handle_upstream_host,
+            CMD_GET_UPSTREAM_HOST: self._handle_upstream_host,
             CMD_SET_DEVICE_ADDRESS: self._handle_set_device_address,
             CMD_GET_DEVICE_ADDRESS: self._handle_get_device_address,
             CMD_REBOOT_MCU: self._handle_reboot_mcu,
@@ -735,23 +1066,30 @@ class SmartUSBHub:
             CMD_GET_PRODUCT_TYPE: self._handle_product_type,
             CMD_GET_MAX_CHANNELS: self._handle_get_max_channels,
             CMD_GET_SERIAL_NO: self._handle_serial_no,
+            CMD_GET_PROTOCOL_FORMAT: self._handle_protocol_format,
         }
 
-        self.lock = threading.Lock()        # serializes @synchronized methods
+        # Public commands may compose other synchronized commands (for example
+        # power-on checks/resets protection). Keep cross-thread serialization
+        # while allowing those calls to reenter on the owning thread.
+        self.lock = threading.RLock()
         self._send_lock = threading.Lock()  # serializes raw serial writes
+        self._v3_lock = threading.RLock()
+        self._v3_header_len = V3_LEGACY_HEADER_LEN
+        self._v3_protocol_known = False
+        self._v3_next_id = int.from_bytes(os.urandom(2), "little") or 1
+        self._v3_pending = {}
+        self._v3_async_deadlines = {}
+        self._v3_recent_ids = {}
+        self._v3_recent_order = deque()
+        self.last_protocol_error = None
 
-        # Command pacing. These defaults were tuned on hardware to sit just above
-        # the physical USB-CDC + MCU round-trip floor (~2.5 ms/command): a 10000-
-        # command sustained run held 100% with these values. Raise them only if a
-        # flakier link (long cable / passive hub) drops ACKs; lowering further
-        # yields nothing (the device is already the limit) and rx poll must stay
-        # >0 so the receive thread does not busy-spin a CPU core.
+        # Limit bursts of writes; callers wait for replies without a fixed settle delay.
         self._last_send_time = 0
         self._min_send_interval = 0.001   # >= 1 ms between writes (burst guard)
         self._mcu_response_wait = 0.000   # no settle; the reply is awaited explicitly
-        # How often the receive thread polls the serial port for reply bytes.
-        # Bounds reply-detection latency; lowering it makes commands feel snappier
-        # at the cost of more CPU wakeups (no effect on the MCU).
+        # A nonzero receive poll interval avoids busy-spinning; shorter intervals
+        # reduce reply-detection latency at the cost of more CPU wakeups.
         self._rx_poll_interval = 0.001
 
         self.disconnect_callback = None
@@ -776,12 +1114,16 @@ class SmartUSBHub:
         self.channel_names = {}
         self.channel_default_dataline_flag = {}
         self.channel_default_dataline_status = {}
+        self.channel_default_usb3_data_flag = {}
+        self.channel_default_usb3_data_status = {}
         self.channel_power_status = {}
         self.channel_dataline_status = {}
+        self.channel_usb3_dataline_status = {}
         self.channel_oc_active = {}   # {ch: bool} current FLAG# state
         self.channel_oc_latch = {}    # {ch: bool} sticky latch, cleared by command
         self.channel_voltages = {}
         self.channel_currents = {}
+        self.channel_powers = {}
         self.channel_measurement_fresh = {}
         self.channel_measurement_valid = {}
         self.channel_measurement_sample_tick = {}
@@ -794,9 +1136,27 @@ class SmartUSBHub:
         # V3 measurement-stream bookkeeping.
         self._measurement_stream_condition = threading.Condition()
         self._measurement_stream_seq = 0
+        self._measurement_stream_received_at = None
         self._measurement_stream_tick = None
         self._measurement_stream_period_ms = None
+        self._capture_stream_enabled = False
+        self._capture_queue = deque()
+        self.measurement_queue_drops = 0
+        self.capture_statistics = {}
+        self.measurement_filter = 0
+        self.measurement_sample_rate = 250
+        self._sample_rate_reply = None
+        self._capture_reply = None
+        self._filter_reply = None
         self._last_v3_status = {}
+        self._device_capabilities = None
+        self._capabilities_checked = False
+        self._protocol_upgrade_warned = False
+        self._capability_query_section = None
+        self._capability_details_loaded = set()
+        self._auth_certificate_response = None
+        self._auth_challenge_response = None
+        self.authentication_info = None
 
         # Consecutive ACK failures before an MCU recovery is attempted.
         self._consecutive_failures = 0
@@ -804,8 +1164,7 @@ class SmartUSBHub:
 
         try:
             self._start()
-            # Allow the MCU state machine to settle if it was previously stuck
-            # (stuck detection is 100 ms, timeout detection 20 ms).
+            # Allow a previous partial command to time out in the MCU parser.
             time.sleep(0.15)
             self.get_device_info()
 
@@ -844,25 +1203,182 @@ class SmartUSBHub:
         return False
 
     def close(self):
-        """Close the connection. Alias for ``disconnect.``"""
+        """Close the connection. Alias for ``disconnect()``."""
         self.disconnect()
 
-    def register_disconnect_callback(self, callback):
-        """
-        Register a callback invoked when the device disconnects unexpectedly.
+    def _handle_alert_response(self, channel, value):
+        if isinstance(value, dict) and value.get("v3") and not value.get("stream"):
+            # _dispatch_frame already verifies command + request ID + status.
+            self._alert_replies[value["_alert_cmd"]] = bytes(value["payload"])
 
-        :param callback: Zero-argument callable executed on disconnect.
+    def _handle_alert_event(self, channel, value):
+        if not isinstance(value, dict) or not value.get("stream"):
+            return
+        p = value.get("payload", b"")
+        if len(p) != 12 or not 1 <= p[8] <= self.max_channels or p[10] > 1 or p[11] > 1:
+            return
+        event = dict(sequence=int.from_bytes(p[:4], "little"),
+                     tick_ms=int.from_bytes(p[4:8], "little"), channel=p[8],
+                     causes=p[9], action="power_off_lock" if p[10] else "notify", power=bool(p[11]))
+        self.last_alert_event = event
+        self._invoke_callback(CMD_ALERT_EVENT, p[8], dict(event))
+
+    def _alert_exchange(self, cmd, payload=b""):
+        if self._get_capabilities().get("alerts", {}).get("supported") is not True:
+            raise FeatureNotSupportedError("Device does not declare measurement hardware alert support")
+        event = self.ack_events[cmd]
+        event.clear()
+        self._alert_replies.pop(cmd, None)
+        self._send_v3_packet(cmd, payload)
+        if not event.wait(max(0.5, self.com_timeout)):
+            return None
+        return self._alert_replies.pop(cmd, None)
+
+    @staticmethod
+    def _alert_type(kind):
+        try:
+            return ALERT_TYPES.index(kind)
+        except ValueError:
+            raise ValueError("kind must be one of " + ", ".join(ALERT_TYPES)) from None
+
+    @staticmethod
+    def _decode_alert_config(p):
+        if p is None or len(p) != 14 or p[1] >= len(ALERT_TYPES):
+            return None
+        return dict(channel=p[0], kind=ALERT_TYPES[p[1]], enabled=bool(p[2]),
+                    samples=p[3], action="power_off_lock" if p[4] else "notify",
+                    threshold=int.from_bytes(p[6:10], "little"),
+                    raw_threshold=int.from_bytes(p[10:14], "little"))
+
+    @synchronized
+    def get_alert_config(self, channel, kind):
+        """Read the applied comparator rule. Threshold units: mA, mV or mW."""
+        if type(channel) is not int or not 1 <= channel <= self.max_channels:
+            raise ValueError("Invalid channel")
+        return self._decode_alert_config(self._alert_exchange(CMD_ALERT_CONFIG, bytes([channel, self._alert_type(kind)])))
+
+    @synchronized
+    def get_alert_defaults(self, channel, kind):
+        """Read MCU factory defaults without changing the active rule."""
+        if type(channel) is not int or not 1 <= channel <= self.max_channels:
+            raise ValueError("Invalid channel")
+        return self._decode_alert_config(self._alert_exchange(
+            CMD_ALERT_CONFIG, bytes([channel, self._alert_type(kind), 0])))
+
+    @synchronized
+    def set_alert_config(self, channel, kind, threshold, enabled=True, samples=1, action="notify"):
+        """Set one rule; return applied rule or None on failure.
+
+        USB3 FW1.0.0 persists settings to App Flash before success. Identical settings do not erase Flash.
+
+        power_off_lock disconnects power/data and blocks all power-on paths.
+        UC/UV are ignored while off and for100ms after switching on. Comparator
+        thresholds are quantized; raw_threshold is the verified register value.
         """
-        self.disconnect_callback = callback
+        t = self._alert_type(kind)
+        if type(channel) is not int or not 1 <= channel <= self.max_channels:
+            raise ValueError("Invalid channel")
+        if type(threshold) is not int or not 0 <= threshold < (5000, 5000, 9000, 9000, 45000)[t]:
+            raise ValueError("Threshold outside comparator range")
+        if type(enabled) is not bool or type(samples) is not int or samples not in (1, 4, 8, 16):
+            raise ValueError("enabled must be bool; samples must be1,4,8 or16")
+        if action not in ("notify", "power_off_lock"):
+            raise ValueError("Invalid alert action")
+        payload = bytes([channel, t, enabled, samples, action == "power_off_lock", 0]) + threshold.to_bytes(4, "little")
+        # Capture holds the measurement hardware bus at a higher RTOS priority. Configuration
+        # needs an uninterrupted threshold/readback/REFRESH session.
+        streaming = self._capture_stream_enabled
+        if streaming and not self._capture_stream(False):
+            raise RuntimeError("无法暂停采集，告警配置未发送")
+        try:
+            return self._decode_alert_config(self._alert_exchange(CMD_ALERT_CONFIG, payload))
+        finally:
+            if streaming and not self._capture_stream(True):
+                raise RuntimeError("告警配置已处理，但采集恢复失败，请检查采集状态")
+
+    @synchronized
+    def get_alert_status(self):
+        """Query MCU-cached status without consuming chip read-to-clear registers."""
+        p = self._alert_exchange(CMD_GET_ALERT_STATUS)
+        if p is None or len(p) != 32 or p[0] != 1:
+            return None
+        return dict(ready=bool(p[1]), io_fault=bool(p[2]), subscribed=bool(p[3]),
+                    sequence=int.from_bytes(p[4:8], "little"), tick_ms=int.from_bytes(p[8:12], "little"),
+                    dropped_events=int.from_bytes(p[12:16], "little"),
+                    channels={ch+1: dict(active=p[16+4*ch], history=p[17+4*ch],
+                              trip=p[18+4*ch], power=bool(p[19+4*ch])) for ch in range(4)})
+
+    def _alert_mask(self, channel_mask):
+        if type(channel_mask) is not int or not 1 <= channel_mask < (1 << self.max_channels):
+            raise ValueError("Invalid channel mask")
+        return bytes([channel_mask])
+
+    @synchronized
+    def clear_alert_latch(self, channel_mask):
+        """Clear alert history.
+
+        :param int channel_mask: Channel bitmask; bit 0 selects CH1.
+        :returns: Whether the device confirmed the mask.
+        :rtype: bool
+        :raises FeatureNotSupportedError: Alerts are unsupported.
+        :raises ValueError: Invalid channel mask."""
+        p = self._alert_mask(channel_mask)
+        return self._alert_exchange(CMD_CLEAR_ALERT_LATCH, p) == p
+
+    @synchronized
+    def reset_protection_trip(self, channel_mask):
+        """Unlock off ports only after a fresh healthy monitor read; never powers on.
+
+        A cleared comparator with power off cannot prove a load fault was removed.
+        A subsequent power-on is an explicit retry, and may trip again.
+        """
+        p = self._alert_mask(channel_mask)
+        return self._alert_exchange(CMD_RESET_PROTECTION_TRIP, p) == p
+
+    @synchronized
+    def subscribe_alert_events(self, enabled=True):
+        """Register CMD_ALERT_EVENT callback first; callback runs on receive thread."""
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be bool")
+        p = bytes([enabled])
+        return self._alert_exchange(CMD_ALERT_EVENT_SUBSCRIPTION, p) == p
+
+    def set_debug_log_enabled(self, enabled):
+        """Subscribe/unsubscribe to MCU-pushed V3 log frames (0x24, STREAM).
+
+        Reply to 0x26 is delivered through register_callback; no ACK recovery.
+        Call once per connection and disable before closing the session.
+        """
+        self._send_v3_packet(CMD_SET_DEBUG_LOG_ENABLE, bytes([bool(enabled)]))
+
+    def request_board_temperature(self):
+        """Request board temperature asynchronously; no temperature is returned.
+
+        Register a CMD_GET_DEBUG_TEMPERATURE callback before requesting.
+        Logs arrive independently; this request does not enable logging.
+        """
+        self._send_v3_packet(CMD_GET_DEBUG_TEMPERATURE, b"")
+
+    def register_disconnect_callback(self, callback):
+        """Deprecated alias for register_callback("disconnect", callback)."""
+        _warn_legacy_api('register_disconnect_callback()', 'register_callback("disconnect", callback)')
+        return self.register_callback("disconnect", callback)
 
     def register_callback(self, cmd, callback):
-        """
-        Register a callback invoked when a command's ACK is received.
+        """Register a command callback or a host-side disconnect event.
 
-        :param cmd: Command code to attach the callback to.
-
-        :param callback: Callable receiving (channel, value) when the ACK arrives.
+        Command callbacks run on the receive thread with ``(channel, value)``;
+        ``value`` is command-specific: an integer, list, or decoded dictionary.
+        "disconnect" invokes a zero-argument callback on unexpected connection
+        loss, after port cleanup, on the receive thread. Explicit disconnect()
+        does not invoke it. Pass None to unregister either kind of callback.
+        Each key has one callback; registering again replaces the previous one.
         """
+        if cmd == "disconnect":
+            if callback is not None and not callable(callback):
+                raise TypeError("disconnect callback must be callable or None")
+            self.disconnect_callback = callback
+            return
         if cmd in self.callbacks:
             self.callbacks[cmd] = callback
             logger.info(f"Callback registered for command {cmd:#04x}")
@@ -870,15 +1386,7 @@ class SmartUSBHub:
             logger.warning(f"Invalid command {cmd:#04x}; cannot register callback.")
 
     def _invoke_callback(self, cmd, *args, **kwargs):
-        """
-        Invoke the user callback registered for a command, if any.
-
-        :param cmd: Command code whose callback should run.
-
-        :param args: Positional arguments forwarded to the callback.
-
-        :param kwargs: Keyword arguments forwarded to the callback.
-        """
+        """Invoke the registered callback; log its errors without stopping reception."""
         callback = self.callbacks.get(cmd)
         if callback:
             try:
@@ -889,7 +1397,9 @@ class SmartUSBHub:
     @staticmethod
     def get_product_info(product_type_id):
         """
-        Look up the capability record for a product-type ID.
+        Look up product metadata and deprecated legacy capability fields.
+
+        For a connected device use get_capability() to read the MCU declaration.
 
         :param product_type_id: Product-type ID (see ``PRODUCT_TYPE_TABLE``).
 
@@ -898,34 +1408,16 @@ class SmartUSBHub:
         return PRODUCT_TYPE_TABLE.get(product_type_id)
 
     def _check_feature_support(self, feature_name):
-        """
-        Report whether the connected device has a named hardware capability.
-
-        :param feature_name: One of "adc", "usb2_data_switch", "usb3_data_switch", "ilim_switch".
-
-        :returns: True if the hardware capability is present, False otherwise.
-
-        :raises FeatureNotSupportedError: If the product type or feature name is unknown.
-        """
-        if self.product_type is None:
-            self.product_type = self.get_product_type()
-        if self.product_type is None:
-            raise FeatureNotSupportedError("Product type is unknown; cannot check feature support.")
-
-        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-        if product_info is None:
-            raise FeatureNotSupportedError(f"Unknown product type: {self.product_type:#02x}")
-
-        feature_map = {
-            "adc": "enable_adc",
-            "usb2_data_switch": "enable_usb2_data_switch",
-            "usb3_data_switch": "enable_usb3_data_switch",
-            "ilim_switch": "enable_ilim_switch",
-        }
-        if feature_name not in feature_map:
-            raise FeatureNotSupportedError(
-                f"Unknown feature name: {feature_name}. Valid features: {list(feature_map)}")
-        return product_info.get(feature_map[feature_name], False)
+        """Use device declarations; infer only for legacy firmware."""
+        if feature_name not in _FEATURE_CAPABILITY:
+            raise FeatureNotSupportedError(f"Unknown feature name: {feature_name}")
+        if self.capabilities_source == "legacy":
+            if self.product_type is None:
+                self.product_type = self.get_product_type()
+            if self.product_type not in _LEGACY_PRODUCT_CAPABILITIES:
+                raise FeatureNotSupportedError(f"Unknown product type: {self.product_type!r}")
+        group = self._get_capabilities()[_FEATURE_CAPABILITY[feature_name]]
+        return group.get("supported") is True
 
     @classmethod
     def scan_available_ports(cls):
@@ -938,13 +1430,256 @@ class SmartUSBHub:
                 if p.vid == 0x1A86 and p.pid == 0xfe0c]
 
     @classmethod
+    def scan_candidates(cls):
+        """
+        Return structured operating-system metadata for SmartUSBHub CMD ports.
+
+        This method only enumerates USB serial devices; it never opens a port or
+        changes device state.  Fields unavailable on a platform are returned as
+        ``None``.
+
+        :returns: List of dictionaries containing port, VID/PID and USB
+            descriptor metadata.
+        """
+        candidates = []
+        for item in serial.tools.list_ports.comports():
+            if item.vid != 0x1A86 or item.pid != 0xfe0c:
+                continue
+            candidates.append({
+                "port": item.device,
+                "vid": item.vid,
+                "pid": item.pid,
+                "serial": getattr(item, "serial_number", None),
+                "manufacturer": getattr(item, "manufacturer", None),
+                "product": getattr(item, "product", None),
+                "description": getattr(item, "description", None),
+                "location": getattr(item, "location", None),
+                "interface": getattr(item, "interface", None),
+                "hwid": getattr(item, "hwid", None),
+            })
+        candidates.sort(key=lambda value: value["port"])
+        return candidates
+
+    @property
+    def capabilities_source(self):
+        """device / legacy / unavailable; capability absence is never support."""
+        if getattr(self, "_device_capabilities", None) is not None:
+            return "device"
+        if getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN) == V3_HEADER_LEN:
+            return "unavailable"
+        return "legacy"
+
+    def _legacy_capabilities(self):
+        """The sole product/version-based capability adapter."""
+        row = _LEGACY_PRODUCT_CAPABILITIES.get(self.product_type, {})
+        major = getattr(self, "firmware_version_major", None)
+        modern = isinstance(major, int) and major >= 2
+        capabilities = {}
+        fields = {"measurement": "enable_adc", "usb2_data_switch": "enable_usb2_data_switch",
+                  "usb3_data_switch": "enable_usb3_data_switch", "overcurrent": "enable_overcurrent",
+                  "upstream_host_switch": "enable_upstream_host_switch",
+                  "current_limit_switch": "enable_ilim_switch"}
+        for name, field in fields.items():
+            supported = bool(row.get(field, False))
+            controllable = supported
+            if name == "upstream_host_switch":
+                controllable = supported and isinstance(major, int) and major >= 3
+            elif name == "current_limit_switch":
+                controllable = False
+            capabilities[name] = dict(supported=supported, controllable=controllable)
+        capabilities["measurement"]["stream"] = modern and capabilities["measurement"]["supported"] and not self._uses_legacy_measurement_queries()
+        version = (major or 0, getattr(self, "firmware_version_minor", 0) or 0)
+        batch = self.product_type == 0x04 and version >= (3, 13)
+        capabilities["measurement"]["capture"] = batch
+        capabilities["measurement"]["sample_rates"] = ([10, 100, 500] if version >= (3, 14) else [500]) if batch else []
+        capabilities["measurement"]["filters"] = ["instant", "avg8"] if batch else []
+        for name in ("power", "auto_restore", "interlock"):
+            capabilities[name] = dict(supported=True, controllable=True)
+        for name in ("identify", "device_alias", "channel_names"):
+            capabilities[name] = dict(supported=modern, controllable=modern)
+        # Legacy firmware does not declare these. UI may use a legacy probe.
+        for name in ("board_temperature", "button_control", "authentication", "debug_log"):
+            capabilities[name] = dict(supported=None, controllable=False)
+        capabilities["board_temperature"]["readable"] = None
+        return capabilities
+
+    def _get_capabilities(self):
+        """Return cached capability declarations or the legacy compatibility view.
+
+        Missing fields on a declaring device remain unknown (supported=None),
+        never backfilled from its model. Returned values are independent copies.
+        :returns: Capability entries with supported and controllable fields.
+        :rtype: dict
+        """
+        if self.capabilities_source == "legacy":
+            return self._legacy_capabilities()
+        remote = getattr(self, "_device_capabilities", None) or {}
+        capabilities = {}
+        for name in set(_CAPABILITY_NAMES) | (set(remote) - {"schema", "channels", "detail_groups", "section", "model", "protocol"}):
+            value = remote.get(name)
+            if type(value) is bool:
+                capabilities[name] = dict(supported=value, controllable=value and name in _CAPABILITY_NAMES)
+            elif isinstance(value, dict) and type(value.get("supported")) is bool:
+                capabilities[name] = copy.deepcopy(value)
+                capabilities[name].setdefault("controllable", False)
+                if name not in _CAPABILITY_NAMES:
+                    capabilities[name]["controllable"] = False
+            else:
+                capabilities[name] = dict(supported=None, controllable=False)
+        # These capabilities have no public SDK configuration method.
+        for name in ("board_temperature", "current_limit_switch"):
+            capabilities[name]["controllable"] = False
+        if isinstance(remote.get("protocol"), dict):
+            capabilities["protocol"] = copy.deepcopy(remote["protocol"])
+        return capabilities
+
+    def _handle_capabilities(self, channel, value):
+        if not isinstance(value, dict) or not value.get("v3"):
+            return
+        try:
+            data = json.loads(value["payload"].decode("utf-8"))
+            if not isinstance(data, dict) or type(data.get("schema")) is not int or data["schema"] != 1:
+                return
+            section = data.get("section")
+            expected = getattr(self, "_capability_query_section", None)
+            if section != expected:
+                return
+            if section is not None:
+                if section not in ("measurement", "alerts", "device") or self._device_capabilities is None:
+                    return
+                detail = data.get(section)
+                if not isinstance(detail, dict) or type(detail.get("supported")) is not bool:
+                    return
+                original = self._device_capabilities.get(section, {})
+                if original and detail["supported"] != original.get("supported"):
+                    return  # A detail/readiness reply cannot change the declaration.
+                if "specs" in detail and not isinstance(detail["specs"], dict):
+                    return
+                if "source" in detail and detail["source"] is not None and not isinstance(detail["source"], str):
+                    return
+                # Specifications cannot override the summary's functional flags.
+                self._device_capabilities.setdefault(section, {"supported": detail["supported"]})
+                for key in detail:
+                    if key not in original or key in ("source", "specs"):
+                        self._device_capabilities[section][key] = copy.deepcopy(detail[key])
+                self._capability_details_loaded.add(section)
+                return
+            for key in ("measurement", "board_temperature"):
+                group = data.get(key)
+                if not isinstance(group, dict) or type(group.get("supported")) is not bool:
+                    return
+            for key in _CAPABILITY_NAMES:
+                if key not in data:
+                    continue
+                group = data[key]
+                if type(group) is bool:
+                    continue
+                if not isinstance(group, dict) or type(group.get("supported")) is not bool:
+                    return
+                if "controllable" in group and type(group["controllable"]) is not bool:
+                    return
+            if "channels" in data and (type(data["channels"]) is not int or not 1 <= data["channels"] <= 16):
+                return
+            groups = data.get("detail_groups", [])
+            if not isinstance(groups, list) or not all(isinstance(name, str) for name in groups):
+                return
+            self._device_capabilities = data
+            self._capability_details_loaded = set()
+        except (KeyError, UnicodeDecodeError, ValueError, TypeError):
+            logger.warning("Invalid device capability JSON")
+
+    def _query_device_capabilities(self):
+        if getattr(self, "_capabilities_checked", False):
+            return
+        if getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN) != V3_HEADER_LEN:
+            self._capabilities_checked = True
+            return
+        event = self.ack_events[CMD_GET_CAPABILITIES]
+        def query(section=None):
+            self._capability_query_section = section
+            try:
+                for _ in range(2):
+                    event.clear()
+                    self._send_v3_packet(CMD_GET_CAPABILITIES, section.encode("ascii") if section else b"")
+                    if event.wait(max(0.3, self.com_timeout)):
+                        if section is None and self._device_capabilities is not None:
+                            return
+                        if section in self._capability_details_loaded:
+                            return
+                    if event.protocol_status in (V3_STATUS_UNSUPPORTED_COMMAND, V3_STATUS_UNSUPPORTED_FEATURE):
+                        return
+            finally:
+                self._capability_query_section = None
+        query()
+        if self._device_capabilities is not None:
+            advertised = self._device_capabilities.get("detail_groups", [])
+            for section in ("measurement", "device", "alerts"):
+                if section in advertised and self._device_capabilities.get(section, {}).get("supported", True):
+                    query(section)
+        self._capabilities_checked = True
+
+    @synchronized
+    def get_capability(self, refresh=False):
+        """Return the MCU JSON document with advertised details merged.
+
+        No legacy/model-derived flags are added. None means no MCU declaration.
+        refresh=True requests the summary and known advertised sections again.
+        :param bool refresh: Query the declaration again.
+        :returns: Independent MCU declaration, or None.
+        :rtype: dict or None
+        """
+        previous = getattr(self, "_device_capabilities", None)
+        if refresh:
+            self._device_capabilities = None
+            self._capabilities_checked = False
+        self._query_device_capabilities()
+        document = getattr(self, "_device_capabilities", None)
+        if document is None and refresh:
+            self._device_capabilities = previous
+        return copy.deepcopy(document)
+
+    def get_identity(self):
+        """
+        Return cached device identity using raw values suitable for JSON.
+
+        Unlike :meth:`get_device_info`, unavailable values remain ``None``
+        rather than being formatted as ``"N/A"``.
+        """
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        return {
+            "port": self.port,
+            "serial": (None if self.serial_no in (None, "", "N/A") else self.serial_no),
+            "address": self.device_address,
+            "alias": self.device_alias or None,
+            "product_type": self.product_type,
+            "model": self._declared_model() or (product_info.get("name") if product_info else None),
+            "channels": self.max_channels,
+            "hardware_version": self.hardware_version,
+            "firmware_version_major": self.firmware_version_major,
+            "firmware_version_minor": self.firmware_version_minor,
+            "operate_mode": (
+                "normal" if self.operate_mode == OPERATE_MODE_NORMAL
+                else "interlock" if self.operate_mode == OPERATE_MODE_INTERLOCK
+                else None
+            ),
+            "auto_restore": (
+                bool(self.auto_restore_status)
+                if self.auto_restore_status is not None else None
+            ),
+            "button_control": (
+                bool(self.button_control_status)
+                if self.button_control_status is not None else None
+            ),
+        }
+
+    @classmethod
     def scan_and_connect(cls, exclude_ports=None, device_address=None):
         """
         Scan for Smart USB Hub devices and connect to the first valid one.
 
         :param exclude_ports: Set of ports to skip; defaults to ports already connected.
 
-        :param device_address: If given, only connect to a device reporting this address. Note: addresses default to 0, so multiple devices may share one; prefer selecting by port. See ``scan_and_connect_by_address.``
+        :param device_address: If given, only connect to a device reporting this address. Note: addresses default to 0, so multiple devices may share one; prefer selecting by port. See :meth:`scan_and_connect_by_address`.
 
         :returns: A connected SmartUSBHub instance, or None if none was found.
         """
@@ -988,12 +1723,13 @@ class SmartUSBHub:
 
         .. warning::
 
-           Addresses default to 0, so multiple devices may share one address, making this selection unreliable. Prefer ``scan_and_connect`` by port, or assign distinct addresses first.
+           Addresses default to 0, so multiple devices may share one address, making this selection unreliable. Use ``SmartUSBHub(port)`` to select a serial port, or assign distinct addresses first.
 
         :param device_address: Device address to match (0x0000 - 0xFFFF).
 
         :returns: A connected SmartUSBHub instance, or None if no match was found.
         """
+        _warn_legacy_api('scan_and_connect_by_address()', 'scan_and_connect(device_address=...)')
         return cls.scan_and_connect(device_address=device_address)
 
     @classmethod
@@ -1001,8 +1737,7 @@ class SmartUSBHub:
         """
         Scan and connect to the first available device, skipping busy ones.
 
-        Unlike ``scan_and_connect``, a busy or failing port is skipped and the next
-        candidate is tried automatically.
+        Busy or failing ports are skipped, as in :meth:`scan_and_connect`.
 
         :param exclude_ports: Set of ports to skip; defaults to ports already connected.
 
@@ -1046,12 +1781,10 @@ class SmartUSBHub:
 
     def _start(self):
         """
-        Start the background UART receive thread.
+        Start the background receive thread.
 
-        The thread is a daemon so it never blocks interpreter shutdown; cleanup is
-        handled by ``disconnect`` and the atexit hook. Unlike earlier versions
-        this no longer installs a process-wide SIGINT handler, which made the
-        library unsafe to construct off the main thread or alongside other code.
+        The daemon thread allows interpreter shutdown; ``disconnect`` and the
+        atexit hook handle connection cleanup.
         """
         self.stop_event = threading.Event()
         self.uart_recv_thread = threading.Thread(
@@ -1063,8 +1796,16 @@ class SmartUSBHub:
         Disconnect from the device and stop the receive thread.
 
         Idempotent and safe to call multiple times (e.g. via context-manager exit
-        and atexit). Releases the port's process-local and cross-process locks.
+        and atexit). Releases the process-local port registration and any held
+        cross-process coordination lock.
         """
+        # Claim cleanup once, including concurrent explicit and receive failures.
+        # A closed instance must never release a later connection's port lock.
+        with self._lifecycle_lock:
+            if getattr(self, '_disconnect_started', False):
+                return
+            self._disconnect_started = True
+
         stop_event = getattr(self, 'stop_event', None)
         if stop_event is not None:
             stop_event.set()
@@ -1077,14 +1818,32 @@ class SmartUSBHub:
         if ser is not None and ser.is_open:
             try:
                 ser.flush()
+            except Exception:
+                pass
+            # Closing must still be attempted when flushing an unplugged serial
+            # device raises.  Otherwise the OS handle can survive long enough to
+            # make the immediate reconnect fail even after registry cleanup.
+            try:
                 ser.close()
             except Exception:
                 pass
+        self.ser = None
+        if hasattr(self, "_v3_lock"):
+            with self._v3_lock:
+                self._v3_pending.clear()
+                getattr(self, "_v3_async_deadlines", {}).clear()
+                self._v3_header_len = V3_LEGACY_HEADER_LEN
+                self._v3_protocol_known = False
+                self._device_capabilities = None
+                self._capabilities_checked = False
+                self._capability_query_section = None
+                self._capability_details_loaded.clear()
 
-        SmartUSBHub._connected_ports.discard(self.port)
-        SmartUSBHub._connected_addresses.pop(self.port, None)
-        SmartUSBHub._instances.discard(self)
-        self._release_port_lock(self.port)
+        with self._lifecycle_lock:
+            SmartUSBHub._connected_ports.discard(self.port)
+            SmartUSBHub._connected_addresses.pop(self.port, None)
+            SmartUSBHub._instances.discard(self)
+            self._release_port_lock(self.port)
 
     def is_connected(self):
         """
@@ -1106,95 +1865,112 @@ class SmartUSBHub:
         Thin wrapper over ``_Codec.parse_frame``; see there for the frame layouts
         and the return shape.
         """
-        return _Codec.parse_frame(data)
+        return _Codec.parse_frame(data, header_len=getattr(self, "_v3_header_len", V3_HEADER_LEN))
 
     def _uart_recv_task(self):
         """
-        Background loop that reads the UART and dispatches complete frames.
+        Background loop that reads the serial link and dispatches complete frames.
 
         Runs until ``stop_event`` is set or the serial link fails. On an unexpected
         disconnect the registered disconnect callback (if any) is invoked.
         """
-        buffer = bytearray()
+        reader = _FrameReader(header_len=getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN))
         while not self.stop_event.is_set():
             try:
+                self._expire_async_v3_requests()
+                reader.header_len = getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN)
+                incoming = b""
                 if self.ser is not None and self.ser.in_waiting > 0:
-                    buffer.extend(self.ser.read(self.ser.in_waiting))
-                    logger.debug(f"rx data: {buffer.hex()}")
-
-                    # Drain as many complete frames as the buffer holds. min_size
-                    # is recomputed each pass so a V1 frame is not skipped after a
-                    # V3 frame is consumed.
-                    while True:
-                        if len(buffer) < 2:
-                            break
-                        is_v3 = (buffer[0] == 0x55 and buffer[1] == 0xAB)
-                        if is_v3:
-                            # Validate the complete V3 magic before trusting the
-                            # declared payload length. Otherwise a corrupt
-                            # ``55 AB`` prefix with a plausible length can hold
-                            # subsequent valid frames in the buffer indefinitely.
-                            if len(buffer) < len(V3_MAGIC):
-                                break
-                            if tuple(buffer[:len(V3_MAGIC)]) != V3_MAGIC:
-                                logger.debug(
-                                    f"Discarding invalid V3 magic: "
-                                    f"{buffer[:len(V3_MAGIC)].hex()}")
-                                buffer.pop(0)
-                                continue
-                            if len(buffer) < V3_HEADER_LEN:
-                                break
-                        elif len(buffer) < 6:
-                            break
-
-                        if is_v3:
-                            data_length = buffer[6] | (buffer[7] << 8)
-                            if data_length > V3_MAX_DATA_LEN:
-                                logger.debug(
-                                    f"Discarding invalid V3 payload length: "
-                                    f"{data_length} > {V3_MAX_DATA_LEN}")
-                                buffer.pop(0)
-                                continue
-                            if len(buffer) < V3_HEADER_LEN + data_length:
-                                break
-                        elif buffer[0] == 0x55 and buffer[1] == 0x5A:
-                            if buffer[2] in self._V2_REPLY_COMMANDS and len(buffer) < 7:
-                                break
-
-                        result = self._parse_protocol_frame(buffer)
-                        if result is None:
-                            buffer.pop(0)
-                            continue
-
-                        cmd, channel, value, length = result
-                        logger.debug(f"Parsed cmd={cmd:#04x}, channel={channel:#04x}, "
-                                     f"value={value}, raw={buffer[:length].hex()}")
-
-                        self._dispatch_frame(cmd, channel, value)
-
-                        del buffer[:length]
+                    incoming = self.ser.read(self.ser.in_waiting)
+                for cmd, channel, value, length in reader.feed(incoming):
+                    self._dispatch_frame(cmd, channel, value)
             except (OSError, AttributeError, serial.SerialException) as e:
-                # errno 6 (ENXIO) and an already-set stop_event indicate an
-                # expected disconnect (device reboot or explicit disconnect()).
+                # ENXIO also occurs on an unexpected USB disappearance. Only
+                # an explicit stop makes a receive failure expected.
                 is_expected = self.stop_event.is_set()
-                if isinstance(e, OSError) and getattr(e, 'errno', None) == 6:
-                    is_expected = True
 
                 if is_expected:
                     logger.debug(f"UART disconnected (expected): {e}")
                 else:
-                    logger.error(f"Error reading from UART: {e}")
+                    logger.error("Error reading from UART port=%s errno=%s: %s",
+                                 self.port, getattr(e, "errno", None), e,
+                                 exc_info=True)
 
-                self.ser = None
-                if self.disconnect_callback:
-                    self.disconnect_callback()
-                self.stop_event.set()
+                # A failed receive loop must perform the same lifecycle cleanup
+                # as an explicit disconnect.  Merely dropping ``self.ser`` leaves
+                # the process-local port registry and cross-process lock held, so
+                # every later reconnect is rejected as busy until the process
+                # exits.  Capture the callback first because disconnect is also
+                # allowed to clear it in future implementations.
+                disconnect_callback = self.disconnect_callback
+                self.disconnect_callback = None
+                self.disconnect()
+                if not is_expected and disconnect_callback:
+                    disconnect_callback()
                 if not is_expected:
                     logger.error("UART disconnected")
                 break
             time.sleep(self._rx_poll_interval)
 
+    def _handle_protocol_format(self, channel, value):
+        self._protocol_format_reply = (channel, value)
+
+    def _negotiate_v3_protocol(self):
+        if getattr(self, "_v3_protocol_known", False):
+            return
+        event = self.ack_events[CMD_GET_PROTOCOL_FORMAT]
+        for _ in range(2):
+            event.clear()
+            self._protocol_format_reply = None
+            self._send_packet(CMD_GET_PROTOCOL_FORMAT, None, 0)
+            if event.wait(max(0.2, self.com_timeout)):
+                if self._protocol_format_reply not in ((3, V3_HEADER_LEN), (255, 255)):
+                    raise DeviceConnectionError("Unsupported V3 protocol format")
+                self._v3_header_len = V3_HEADER_LEN if self._protocol_format_reply == (3, V3_HEADER_LEN) else V3_LEGACY_HEADER_LEN
+                self._v3_protocol_known = True
+                return
+        # Legacy devices may silently ignore this read-only command.
+        self._v3_protocol_known = True
+
     def _dispatch_frame(self, cmd, channel, value):
+        if isinstance(value, dict) and "request_id" in value:
+            with self._v3_lock:
+                self._expire_async_v3_requests()
+                if value["flags"] == V3_FLAG_REQUEST:
+                    return
+                if not value["stream"]:
+                    pending = self._v3_pending.get(cmd)
+                    # Serial bodies solicited by a V1 query have no request ID.
+                    v1_serial = (cmd == CMD_GET_SERIAL_NO and value["request_id"] == 0
+                                 and pending is None)
+                    if not v1_serial and pending != value["request_id"]:
+                        logger.debug("Discarding unmatched V3 response cmd=%02X id=%s", cmd, value["request_id"])
+                        return
+                    if not v1_serial:
+                        self._cancel_v3_request(cmd, pending)
+                    self._last_v3_status[cmd] = value["status"]
+                    if value["status"] != V3_STATUS_OK:
+                        if cmd == CMD_AUTH_GET_CERTIFICATE:
+                            self._auth_certificate_response = value["payload"]
+                        elif cmd == CMD_AUTH_CHALLENGE:
+                            self._auth_challenge_response = value["payload"]
+                        self.last_protocol_error = {"cmd": cmd, "request_id": value["request_id"],
+                                                    "status": value["status"]}
+                        self._last_v3_status[cmd] = value["status"]
+                        event = self.ack_events.get(cmd)
+                        if event is not None:
+                            event.protocol_status = value["status"]
+                            event.set()
+                        # Deliver diagnostics to callback-only consumers (e.g. board
+                        # temperature), while keeping success caches untouched.
+                        self._invoke_callback(cmd, channel, value)
+                        return
+                    self.last_protocol_error = None
+                self._dispatch_frame_impl(cmd, channel, value)
+        else:
+            self._dispatch_frame_impl(cmd, channel, value)
+
+    def _dispatch_frame_impl(self, cmd, channel, value):
         """
         Route one decoded frame to its state handler and ACK / wake sinks.
 
@@ -1202,14 +1978,34 @@ class SmartUSBHub:
         session (update state, satisfy waiters). Called only from the receive
         thread, one call per complete frame.
         """
+        # Persistent V1/V2 setters retain their success frames. Firmware uses
+        # out-of-domain values to report a failed save; such replies acknowledge
+        # receipt without claiming that the configuration was stored.
+        if cmd in (CMD_SET_OPERATE_MODE, CMD_SET_BUTTON_CONTROL, CMD_SET_AUTO_RESTORE):
+            self.ack_events[cmd].response_ok = channel == 0 and value in (0, 1)
+        elif cmd in (CMD_SET_DEFAULT_POWER_STATUS, CMD_SET_DEFAULT_DATALINE_STATUS):
+            self.ack_events[cmd].response_ok = (isinstance(value, list) and len(value) == 2
+                                                 and all(v in (0, 1) for v in value))
+        elif cmd == CMD_FACTORY_RESET:
+            self.ack_events[cmd].response_ok = channel == 0 and value == 0
+        if cmd in self._STATUS_MASK_QUERIES:
+            if not self._handle_channel_status_mask(cmd, channel, value):
+                return
+        if cmd in self._DEFAULT_MASK_QUERIES:
+            if not self._handle_default_status_mask(cmd, channel, value):
+                return
         handler = self._frame_handlers.get(cmd)
         if handler is not None:
+            if cmd in (CMD_ALERT_CONFIG, CMD_GET_ALERT_STATUS, CMD_CLEAR_ALERT_LATCH, CMD_ALERT_EVENT_SUBSCRIPTION, CMD_RESET_PROTECTION_TRIP) and isinstance(value, dict):
+                value = dict(value, _alert_cmd=cmd)
             handler(channel, value)
 
         # Stream frames are unsolicited notifications and must not satisfy a
         # pending ACK wait.
         is_stream_notify = (isinstance(value, dict)
                             and value.get("v3") and value.get("stream"))
+        if cmd == CMD_DEBUG_LOG and is_stream_notify:
+            self._invoke_callback(cmd, channel, value)
         if cmd in self.ack_events and not is_stream_notify:
             self._invoke_callback(cmd, channel, value)
             self.ack_events[cmd].set()
@@ -1219,22 +2015,23 @@ class SmartUSBHub:
         with self._frame_condition:
             self._frame_condition.notify_all()
 
-    def _wait_for_channel_cache(self, cache, channels, timeout=None):
+    def _wait_for_channel_cache(self, cache, channels, timeout=None, additional_caches=()):
         """
         Block until every channel in ``channels`` is present in ``cache``, or timeout.
 
-        Replaces fixed post-ACK settle delays for multi-frame replies (the device
-        sends one reply frame per channel): the receive thread notifies
-        ``_frame_condition`` after each frame, so this returns the instant the last
-        expected channel lands — deterministic rather than guessing a delay. Callers
-        should drop the stale entries for ``channels`` before sending, so a hit here
-        always reflects this request's fresh frames.
+        The receiver notifies ``_frame_condition`` after each frame. Callers must
+        remove existing entries for these channels before sending the query.
+        Legacy V1/V2 replies have no request ID, so a late reply from an earlier
+        query can still populate the cache.
 
         :param cache: Per-channel state dict the receive thread populates.
 
         :param channels: Channels that must all be present.
 
-        :param timeout: Max wait in seconds; defaults to ``self.com_timeout.``
+        :param timeout: Max wait in seconds; defaults to ``self.com_timeout``.
+
+        :param additional_caches: Other per-channel dictionaries that must also
+            contain every requested channel (e.g. default enable/value pairs).
 
         :returns: True if all channels arrived, False on timeout.
         """
@@ -1242,7 +2039,8 @@ class SmartUSBHub:
             timeout = self.com_timeout
         deadline = time.monotonic() + timeout
         with self._frame_condition:
-            while not all(ch in cache for ch in channels):
+            while not all(ch in current for current in (cache,) + additional_caches
+                          for ch in channels):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -1270,12 +2068,12 @@ class SmartUSBHub:
         """
         Build and send a V1/V2 packet to the device.
 
-        Enforces the minimum inter-command interval and post-write settle delay so
-        the MCU is never overrun, even when ``ENABLE_SYNC_LOCK`` is False.
+        Serializes writes and applies the configured minimum write interval and
+        post-write settle delay, independently of ``ENABLE_SYNC_LOCK``.
 
         :param cmd: Command byte.
 
-        :param channels: Channel list, or a raw channel-mask int for CMD_SET_DEVICE_ADDRESS.
+        :param channels: Channel list, or the raw address high byte for CMD_SET_DEVICE_ADDRESS.
 
         :param data: Extra payload byte(s); defaults to a single 0x00 byte.
 
@@ -1286,7 +2084,7 @@ class SmartUSBHub:
         elif channels is None:
             channel_mask = 0
         else:
-            channel_mask = sum(1 << (ch - 1) for ch in channels)
+            channel_mask = self._channel_mask(channels)
 
         if data is None:
             data = [0x00]
@@ -1306,6 +2104,32 @@ class SmartUSBHub:
             logger.debug(f"Sent command: {packet.hex()}")
         return packet
 
+    def _cancel_v3_request(self, cmd, request_id):
+        with self._v3_lock:
+            if self._v3_pending.get(cmd) == request_id:
+                self._v3_pending.pop(cmd, None)
+                getattr(self, "_v3_async_deadlines", {}).pop(cmd, None)
+
+    def _track_async_v3_request(self, cmd):
+        """Retire fire-and-forget requests even when nobody calls Event.wait()."""
+        if getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN) != V3_HEADER_LEN:
+            return
+        with self._v3_lock:
+            request_id = self._v3_pending.get(cmd)
+            if request_id is not None:
+                self._v3_async_deadlines[cmd] = (request_id, time.monotonic() + self.com_timeout)
+
+    def _expire_async_v3_requests(self):
+        deadlines = getattr(self, "_v3_async_deadlines", {})
+        if not deadlines:
+            return
+        with self._v3_lock:
+            now = time.monotonic()
+            for cmd, (request_id, deadline) in list(deadlines.items()):
+                if now >= deadline:
+                    self._cancel_v3_request(cmd, request_id)
+                    deadlines.pop(cmd, None)
+
     def _send_v3_packet(self, cmd, payload=b""):
         """
         Build and send a V3 packet to the device.
@@ -1318,17 +2142,58 @@ class SmartUSBHub:
 
         :raises ValueError: If the payload exceeds ``V3_MAX_DATA_LEN.``
         """
-        packet = _Codec.encode_v3(cmd, payload)
-
-        with self._send_lock:
-            elapsed = time.time() - self._last_send_time
-            if elapsed < self._min_send_interval:
-                time.sleep(self._min_send_interval - elapsed)
-            if self.ser and self.ser.is_open:
-                self.ser.write(packet)
-            self._last_send_time = time.time()
-            time.sleep(self._mcu_response_wait)
-            logger.debug(f"Sent V3 command: {packet.hex()}")
+        header_len = getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN)
+        request_id = 1
+        if header_len == V3_HEADER_LEN:
+            with self._v3_lock:
+                self._expire_async_v3_requests()
+                # Callback-only diagnostic polls may replace a lost earlier poll.
+                if (cmd in self._v3_pending and cmd in self.ack_events and
+                        cmd not in (CMD_GET_DEBUG_TEMPERATURE, CMD_SET_DEBUG_LOG_ENABLE)):
+                    raise SmartUSBHubError(f"V3 command 0x{cmd:02X} is already awaiting a response")
+                now = time.monotonic()
+                if not hasattr(self, "_v3_recent_order"):
+                    self._v3_recent_order = deque()
+                while self._v3_recent_order and now - self._v3_recent_order[0][1] >= 60:
+                    expired_id, _ = self._v3_recent_order.popleft()
+                    self._v3_recent_ids.pop(expired_id, None)
+                active = set(self._v3_pending.values())
+                for _ in range(65535):
+                    request_id = self._v3_next_id
+                    self._v3_next_id = request_id % 65535 + 1
+                    if request_id not in active and request_id not in self._v3_recent_ids:
+                        break
+                else:
+                    raise SmartUSBHubError("V3 request IDs temporarily exhausted")
+                # Encode before publication so invalid arguments leave no pending request.
+                packet = _Codec.encode_v3(cmd, payload, request_id=request_id)
+                self._v3_pending[cmd] = request_id
+                self._v3_recent_ids[request_id] = now
+                self._v3_recent_order.append((request_id, now))
+                self.last_protocol_error = None
+                event = self.ack_events.get(cmd)
+                if event is not None:
+                    event.clear()
+                    event.on_timeout = lambda: self._cancel_v3_request(cmd, request_id)
+        else:
+            packet = _Codec.encode_v3(cmd, payload, header_len=header_len)
+        try:
+            with self._send_lock:
+                elapsed = time.time() - self._last_send_time
+                if elapsed < self._min_send_interval:
+                    time.sleep(self._min_send_interval - elapsed)
+                if self.ser and self.ser.is_open:
+                    written = self.ser.write(packet)
+                    if written != len(packet):
+                        raise DeviceConnectionError("Incomplete V3 serial write")
+                self._last_send_time = time.time()
+                time.sleep(self._mcu_response_wait)
+        except Exception:
+            if header_len == V3_HEADER_LEN:
+                with self._v3_lock:
+                    if self._v3_pending.get(cmd) == request_id:
+                        self._v3_pending.pop(cmd, None)
+            raise
         return packet
 
     def _wait_for_ack_with_recovery(self, cmd, timeout=None):
@@ -1338,15 +2203,15 @@ class SmartUSBHub:
         The caller must clear ``self.ack_events[cmd]`` immediately before sending
         the command (the same discipline the get_* methods follow). This wait then
         consumes exactly that command's ACK and clears the event again on success,
-        so a satisfied ACK can never leak into the next command's wait. Clearing
-        before the send also discards any late ACK left over from a previously
-        timed-out command, so a stale frame cannot produce a false positive.
+        so a satisfied ACK is consumed before the next wait. Current V3 also
+        matches request IDs and retires timed-out requests; clearing an Event
+        alone cannot distinguish late replies on legacy V1/V2 or non-current framing.
 
         :param cmd: Command code to wait on.
 
-        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout.``
+        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout``.
 
-        :returns: True if the ACK arrived, False on timeout.
+        :returns: True on an accepted ACK, False on rejection or timeout.
         """
         if timeout is None:
             timeout = self.com_timeout
@@ -1363,6 +2228,9 @@ class SmartUSBHub:
             self._consecutive_failures = 0
             return True
 
+        if (getattr(ack_event, "protocol_status", V3_STATUS_OK) != V3_STATUS_OK
+                or not getattr(ack_event, "response_ok", True)):
+            return False
         self._consecutive_failures += 1
         if self._consecutive_failures >= self._max_consecutive_failures:
             logger.warning(f"Too many consecutive failures ({self._consecutive_failures}); "
@@ -1374,7 +2242,7 @@ class SmartUSBHub:
     def _trigger_mcu_recovery(self):
         """Give the MCU state machine time to recover and flush stale input."""
         logger.debug("Triggering MCU state-machine recovery...")
-        time.sleep(0.15)  # stuck detection is 100 ms, timeout detection 20 ms
+        time.sleep(0.15)  # Allow the MCU parser to time out a partial command.
         if self.ser and self.ser.is_open:
             try:
                 if self.ser.in_waiting > 0:
@@ -1383,16 +2251,10 @@ class SmartUSBHub:
             except Exception as e:
                 logger.warning(f"Failed to clear input buffer: {e}")
 
+    # Frame handlers update cached state or response validity. The dispatcher
+    # invokes callbacks and signals ACK events for command replies.
     def _handle_set_operate_mode(self, channel, value):
-        """
-        --- Frame handlers ------------------------------------------------------
-        Each handler updates cached state for an incoming frame. They share the
-        uniform (channel, value) signature required by the dispatch table; the ACK
-        Event and user callback are signalled centrally in _uart_recv_task, so
-        handlers never touch ack_events themselves.
-
-        Handle a set-operate-mode ACK (no state change).
-        """
+        """Log a set-operate-mode ACK; mode is refreshed by its query handler."""
         logger.debug("set_operate_mode ACK")
 
     def _handle_get_operate_mode(self, channel, value):
@@ -1400,18 +2262,126 @@ class SmartUSBHub:
         self.operate_mode = value
 
     def _handle_set_channel_power_status(self, channel, value):
-        """Handle a set-channel-power ACK (no state change)."""
-        logger.debug("set_channel_power ACK")
+        """Validate a set-channel-power ACK without updating cached power state."""
+        self.ack_events[CMD_SET_CHANNEL_POWER].response_ok = value in (0, 1)
+        logger.debug("set_channel_power ACK: %s", value)
 
     def _handle_get_channel_power_status(self, channel, value):
         """Cache per-channel power state from a status reply."""
+        if value not in (0, 1):
+            return
         for ch in self._convert_channel(channel):
             self.channel_power_status[ch] = value
             logger.debug(f"power status: ch{ch} = {value}")
 
+    def _handle_channel_status_mask(self, cmd, low, high):
+        """Expand a validated whole-device V1 mask and preserve status callbacks."""
+        if type(low) is not int or type(high) is not int:
+            return False
+        channels = self._resolve_channels(())
+        count = len(channels)
+        mask = low | (high << 8)
+        if not 1 <= count <= 16 or mask & ~((1 << count) - 1):
+            return False
+        legacy_cmd, cache_name = self._STATUS_MASK_QUERIES[cmd]
+        values = {ch: (mask >> (ch - 1)) & 1 for ch in channels}
+        getattr(self, cache_name).update(values)
+        for ch, state in values.items():
+            self._invoke_callback(legacy_cmd, 1 << (ch - 1), state)
+        return True
+
+    def _get_channel_status(self, mask_cmd, channels):
+        """Use declared aggregate queries, otherwise collect fresh legacy replies."""
+        channels = self._resolve_channels(channels)
+        available = self._resolve_channels(())
+        if any(type(ch) is not int or ch not in available for ch in channels):
+            raise ValueError("Invalid channel number")
+        channels = tuple(dict.fromkeys(channels))
+        legacy_cmd, cache_name = self._STATUS_MASK_QUERIES[mask_cmd]
+        cache = getattr(self, cache_name)
+        aggregate = (getattr(self, "_device_capabilities", None) or {}).get("channel_status_mask") is True
+        if not aggregate and any(ch > 8 for ch in channels):
+            raise FeatureNotSupportedError("Legacy status queries support channels 1 through 8")
+        for ch in channels:
+            cache.pop(ch, None)
+        if aggregate:
+            event = self.ack_events[mask_cmd]
+            event.clear()
+            self._send_packet(mask_cmd, None, 0)
+            if not event.wait(self.com_timeout):
+                logger.error("Status mask query 0x%02X timed out", mask_cmd)
+                return None
+        else:
+            self._send_packet(legacy_cmd, channels)
+            if not self._wait_for_channel_cache(cache, channels):
+                missing = [ch for ch in channels if ch not in cache]
+                logger.error("Status query 0x%02X timed out, missing channels %s", legacy_cmd, missing)
+        return self._filter_channel_dict(cache, channels) or None
+
+    def _handle_default_status_mask(self, cmd, low, data):
+        """Expand a 24-bit default configuration with two bits per channel."""
+        if type(low) is not int or not isinstance(data, list) or len(data) != 2:
+            return False
+        channels = self._resolve_channels(())
+        packed = low | (data[0] << 8) | (data[1] << 16)
+        if not 1 <= len(channels) <= 12 or packed >> (2 * len(channels)):
+            return False
+        legacy_cmd, flags_name, values_name = self._DEFAULT_MASK_QUERIES[cmd]
+        flags, values = getattr(self, flags_name), getattr(self, values_name)
+        flags.update({ch: (packed >> (2 * (ch - 1))) & 1 for ch in channels})
+        values.update({ch: (packed >> (2 * (ch - 1) + 1)) & 1 for ch in channels})
+        if cmd == CMD_GET_DEFAULT_USB3_DATALINE_MASK:
+            # Current USB3 callback consumers use the old V3 payload shape.
+            # That interface addresses up to eight channels.
+            if len(channels) <= 8:
+                payload = bytes([(1 << len(channels)) - 1,
+                                 sum(flags[ch] << (ch - 1) for ch in channels),
+                                 sum(values[ch] << (ch - 1) for ch in channels)])
+                self._invoke_callback(legacy_cmd, 0, {
+                    "v3": True, "stream": False, "payload": payload,
+                    "request_id": 0, "status": V3_STATUS_OK,
+                    "flags": V3_FLAG_RESPONSE, "transport": "v2",
+                })
+        else:
+            for ch in channels:
+                self._invoke_callback(legacy_cmd, 1 << (ch - 1), [flags[ch], values[ch]])
+        return True
+
+    def _get_default_status(self, cmd, channels, flags, values, mask_cmd):
+        """Wait for all fresh default enable/value pairs, preserving partial results."""
+        channels = self._resolve_channels(channels)
+        available = self._resolve_channels(())
+        if any(type(ch) is not int or ch not in available for ch in channels):
+            raise ValueError("Invalid channel number")
+        channels = tuple(dict.fromkeys(channels))
+        device = (getattr(self, "_device_capabilities", None) or {}).get("device", {})
+        aggregate = isinstance(device, dict) and device.get("default_status_mask") is True
+        if aggregate and len(available) > 12:
+            raise FeatureNotSupportedError("Aggregate default queries support up to 12 channels")
+        if not aggregate and any(ch > 8 for ch in channels):
+            raise FeatureNotSupportedError("Legacy default queries support channels 1 through 8")
+        for ch in channels:
+            flags.pop(ch, None)
+            values.pop(ch, None)
+        if aggregate:
+            event = self.ack_events[mask_cmd]
+            event.clear()
+            self._send_packet(mask_cmd, None, 0)
+            if not event.wait(self.com_timeout):
+                logger.error("Default mask query 0x%02X timed out", mask_cmd)
+                return None
+        else:
+            self._send_packet(cmd, channels, [0, 0])
+            if not self._wait_for_channel_cache(flags, channels, additional_caches=(values,)):
+                missing = [ch for ch in channels if ch not in flags or ch not in values]
+                logger.error("Default query 0x%02X timed out, missing channels %s", cmd, missing)
+        return {ch: {"enabled": flags[ch], "value": values[ch]}
+                for ch in channels if ch in flags and ch in values} or None
+
     def _handle_power_interlock_control(self, channel, value):
-        """Handle a power-interlock ACK (no state change)."""
-        logger.debug("power_interlock ACK")
+        """Validate a power-interlock ACK without updating cached power state."""
+        self.ack_events[CMD_SET_CHANNEL_POWER_INTERLOCK].response_ok = value in (0, 1)
+        logger.debug("power_interlock ACK: %s", value)
 
     def _handle_oc_status(self, channel, value):
         """
@@ -1452,9 +2422,202 @@ class SmartUSBHub:
     def _handle_get_channel_measurements(self, channel, value):
         """Route a measurement frame to the V3 or legacy decoder."""
         if isinstance(value, dict) and value.get("v3"):
-            self._handle_v3_measurements(value.get("payload", b""))
+            self._handle_v3_measurements(
+                value.get("payload", b""),
+                update_stream=(not getattr(self, '_capture_stream_enabled', False)
+                               or bool(value.get('stream'))))
         else:
             self._handle_legacy_measurements(value)
+
+    def supports_measurement_capture(self):
+        """Whether the device declares batch capture, independent of its rate."""
+        group = self._get_capabilities()["measurement"]
+        return (group.get("supported") is True and group.get("capture") is True
+                and bool(self.supported_sample_rates()))
+
+    def _handle_measurement_filter(self, channel, value):
+        payload = value.get('payload', b'') if isinstance(value, dict) else b''
+        self._filter_reply = payload[0] if len(payload) == 1 else 255
+        if self._filter_reply in (0, 1):
+            self.measurement_filter = self._filter_reply
+
+    def supported_sample_rates(self):
+        """Return declared measurement sample rates in samples per second.
+
+        :returns: Declared rates, or an empty tuple.
+        :rtype: tuple
+        """
+        rates = self._get_capabilities()["measurement"].get("sample_rates", [])
+        if isinstance(rates, list) and all(type(n) is int and 0 < n <= 65535 for n in rates):
+            return tuple(rates)
+        return ()
+
+    def _handle_measurement_rate(self, channel, value):
+        data = value.get('payload', b'') if isinstance(value, dict) else b''
+        self._sample_rate_reply = int.from_bytes(data, 'little') if len(data) == 2 else 0
+        if 0 < self._sample_rate_reply <= 65535:
+            self.measurement_sample_rate = self._sample_rate_reply
+
+    @synchronized
+    def get_measurement_sample_rate(self):
+        """Read the measurement sample rate.
+
+        A device declaring only 500 samples/s returns 500 without a query.
+
+        :returns: Rate in samples/s, or None on failed query.
+        :rtype: int or None
+        :raises FeatureNotSupportedError: No declared rates.
+        """
+        rates = self.supported_sample_rates()
+        if not rates:
+            raise FeatureNotSupportedError('Selectable sample rates require USB3 RevB')
+        if rates == (500,):
+            self.measurement_sample_rate = 500
+            return 500
+        event = self.ack_events[CMD_MEASUREMENT_RATE]
+        event.clear(); self._sample_rate_reply = None
+        self._send_v3_packet(CMD_MEASUREMENT_RATE)
+        return self.measurement_sample_rate if event.wait(self.com_timeout) and self._sample_rate_reply in rates else None
+
+    @synchronized
+    def set_measurement_sample_rate(self, rate):
+        """Select a declared measurement sample rate.
+
+        Active capture is paused and resumed around the change.
+
+        :param int rate: Rate in samples/s.
+        :returns: Whether the change and capture recovery succeeded.
+        :rtype: bool
+        :raises ValueError: Rate is not a positive uint16.
+        :raises FeatureNotSupportedError: Rate is not declared.
+        """
+        if type(rate) is not int or not 0 < rate <= 65535:
+            raise ValueError("sample rate must be a positive uint16 declared by the device")
+        rates = self.supported_sample_rates()
+        if rate not in rates:
+            raise FeatureNotSupportedError('Requested sample rate is not declared by this device')
+        if rates == (500,):
+            self.measurement_sample_rate = 500
+            return True
+        streaming = self._capture_stream_enabled
+        if streaming and not self._capture_stream(False):
+            return False
+        event = self.ack_events[CMD_MEASUREMENT_RATE]
+        event.clear(); self._sample_rate_reply = None
+        self._send_v3_packet(CMD_MEASUREMENT_RATE, [rate & 255, rate >> 8])
+        success = event.wait(self.com_timeout) and self._sample_rate_reply == rate
+        if streaming:
+            success = self._capture_stream(True) and success
+        return bool(success)
+
+    def _handle_capture(self, channel, value):
+        if not isinstance(value, dict):
+            return
+        payload = value.get('payload', b'')
+        if not value.get('stream'):
+            self._capture_reply = payload[0] if len(payload) == 1 else 255
+            return
+        try:
+            batch = decode_usb3_capture_batch(payload)
+        except ValueError:
+            logger.warning('Invalid capture batch')
+            return
+        with self._measurement_stream_condition:
+            self.capture_statistics = {k: batch[k] for k in ('drops', 'errors', 'duplicates')}
+            self.measurement_filter = batch['filter']
+            self.measurement_sample_rate = batch['sample_rate']
+            for record in batch['records']:
+                tick = record['refresh_us'] // 1000
+                sample = {}
+                for ch in range(1, 5):
+                    v, a = record['voltage_mv'][ch-1], record['current_ma'][ch-1]
+                    self.channel_voltages[ch], self.channel_currents[ch] = v, a
+                    self.channel_measurement_valid[ch] = True
+                    self.channel_measurement_fresh[ch] = True
+                    self.channel_measurement_sample_tick[ch] = tick
+                    sample[ch] = dict(voltage=v, current=a, valid=True, fresh=True,
+                                      stale=False, sample_tick=tick, sample_period_ms=1000 // batch['sample_rate'],
+                                      sample_time_us=record['refresh_us'],
+                                      sequence=record['sequence'],
+                                      conversion_count=record['conversion_count'],
+                                      filter=batch['filter'])
+                    if 'power_uw' in record:
+                        sample[ch]['power'] = record['power_uw'][ch-1] / 1000.0  # mW
+                        self.channel_powers[ch] = sample[ch]['power']
+                        sample[ch]['power_source'] = 'hardware_instant'
+                if len(self._capture_queue) >= 2048:
+                    self._capture_queue.popleft()
+                    self.measurement_queue_drops += 1
+                self._capture_queue.append(sample)
+                self._measurement_stream_seq += 1
+                self._measurement_stream_tick = tick
+                self._measurement_stream_period_ms = 1000 // batch['sample_rate']
+            if batch['records']:
+                self._measurement_stream_received_at = time.monotonic()
+            self._measurement_stream_condition.notify_all()
+
+    def _capture_stream(self, enabled, wait_ack=True):
+        event = self.ack_events[CMD_LAB_CAPTURE]
+        event.clear()
+        self._capture_reply = None
+        if enabled:
+            with self._measurement_stream_condition:
+                self._capture_queue.clear()
+                self.measurement_queue_drops = 0
+            self._capture_stream_enabled = True
+        payload = [int(bool(enabled))]
+        if self.supported_sample_rates() != (500,):
+            payload.append(3)
+        self._send_v3_packet(CMD_LAB_CAPTURE, payload)
+        if not wait_ack:
+            self._track_async_v3_request(CMD_LAB_CAPTURE)
+        success = (not wait_ack or
+                   (event.wait(self.com_timeout) and self._capture_reply == int(bool(enabled))))
+        if not enabled or not success:
+            self._capture_stream_enabled = False
+            with self._measurement_stream_condition:
+                self._capture_queue.clear()
+                self._measurement_stream_condition.notify_all()
+        return success
+
+    @synchronized
+    def get_measurement_filter(self):
+        """Read the measurement filter mode.
+
+        :returns: 0 for instantaneous, 1 for eight-conversion averaging, or None on failure.
+        :rtype: int or None
+        :raises FeatureNotSupportedError: Filters are not declared.
+        """
+        if not self._get_capabilities()["measurement"].get("filters"):
+            raise FeatureNotSupportedError('Device does not declare configurable measurement filters')
+        event = self.ack_events[CMD_MEASUREMENT_FILTER]
+        event.clear()
+        self._filter_reply = None
+        self._send_v3_packet(CMD_MEASUREMENT_FILTER)
+        return self.measurement_filter if event.wait(self.com_timeout) and self._filter_reply in (0, 1) else None
+
+    @synchronized
+    def set_measurement_filter(self, mode):
+        """Select measurement hardware instantaneous (0) or internal eight-conversion average (1).
+        RAM only. Averaging window ~7.8ms at 1024SPS; output follows the selected sample rate.
+        The stream is stopped/restarted; queued samples never mix settings.
+        """
+        if mode not in (0, 1):
+            raise ValueError('filter must be 0 or 1')
+        selected_filter = "avg8" if mode else "instant"
+        if selected_filter not in self._get_capabilities()["measurement"].get("filters", []):
+            raise FeatureNotSupportedError('Requested measurement filter is not declared by this device')
+        streaming = self._capture_stream_enabled
+        if streaming and not self._capture_stream(False):
+            return False
+        event = self.ack_events[CMD_MEASUREMENT_FILTER]
+        event.clear()
+        self._filter_reply = None
+        self._send_v3_packet(CMD_MEASUREMENT_FILTER, [mode])
+        success = event.wait(self.com_timeout) and self._filter_reply == mode
+        if streaming:
+            success = self._capture_stream(True) and success
+        return bool(success)
 
     def _handle_legacy_measurements(self, value):
         """
@@ -1489,7 +2652,7 @@ class SmartUSBHub:
                          f"{self.channel_currents[ch]} mA")
             pos += 4
 
-    def _handle_v3_measurements(self, value):
+    def _handle_v3_measurements(self, value, update_stream=True):
         """
         Decode a V3 batch/stream measurement payload and notify stream waiters.
 
@@ -1511,15 +2674,19 @@ class SmartUSBHub:
         sample_period_ms = payload[3]
         sample_tick = (payload[4] | (payload[5] << 8)
                        | (payload[6] << 16) | (payload[7] << 24))
+        if len(payload) != 8 + 8 * len(self._convert_channel(channel_mask)):
+            logger.error("Invalid measurement length; upgrade device firmware and SDK together")
+            return
         pos = 8
         updated = []
         with self._measurement_stream_condition:
             for ch in self._convert_channel(channel_mask):
-                if pos + 4 > len(payload):
+                if pos + 8 > len(payload):
                     logger.error("Truncated V3 measurement payload")
                     break
                 self.channel_voltages[ch] = payload[pos] | (payload[pos + 1] << 8)
                 self.channel_currents[ch] = payload[pos + 2] | (payload[pos + 3] << 8)
+                self.channel_powers[ch] = int.from_bytes(payload[pos + 4:pos + 8], "little") / 1000.0
                 self.channel_measurement_fresh[ch] = bool(fresh_mask & (1 << (ch - 1)))
                 self.channel_measurement_valid[ch] = bool(valid_mask & (1 << (ch - 1)))
                 self.channel_measurement_sample_tick[ch] = sample_tick
@@ -1527,12 +2694,13 @@ class SmartUSBHub:
                 logger.debug(f"V3 measurement: ch{ch} = {self.channel_voltages[ch]} mV, "
                              f"{self.channel_currents[ch]} mA, period={sample_period_ms} ms, "
                              f"tick={sample_tick}")
-                pos += 4
+                pos += 8
 
-            if updated:
+            if updated and update_stream:
                 self._measurement_stream_tick = sample_tick
                 self._measurement_stream_period_ms = sample_period_ms
                 self._measurement_stream_seq += 1
+                self._measurement_stream_received_at = time.monotonic()
                 self._measurement_stream_condition.notify_all()
 
     def _handle_set_channel_dataline(self, channel, value):
@@ -1542,6 +2710,8 @@ class SmartUSBHub:
 
     def _handle_get_channel_dataline(self, channel, value):
         """Cache per-channel USB2 data-line state from a status reply."""
+        if value not in (0, 1):
+            return
         for ch in self._convert_channel(channel):
             self.channel_dataline_status[ch] = value
 
@@ -1555,7 +2725,7 @@ class SmartUSBHub:
 
     def _store_default_status(self, channel, value, flag_dict, status_dict, label):
         """
-        Cache default power flag/value for the channels in a frame.
+        Cache default enable/value pairs for the channels in a frame.
 
         :param flag_dict: Destination dict for the enable flags.
 
@@ -1563,7 +2733,7 @@ class SmartUSBHub:
 
         :param label: Human-readable label for logging.
         """
-        if isinstance(value, list) and len(value) == 2:
+        if isinstance(value, list) and len(value) == 2 and all(v in (0, 1) for v in value):
             enable, status = value
             for ch in self._convert_channel(channel):
                 flag_dict[ch] = enable
@@ -1593,8 +2763,17 @@ class SmartUSBHub:
         self._store_default_status(channel, value, self.channel_default_dataline_flag,
                                    self.channel_default_dataline_status, "dataline status")
 
+    def _handle_usb3_dataline(self, channel, value):
+        if value in (0, 1):
+            for ch in self._convert_channel(channel):
+                self.channel_usb3_dataline_status[ch] = value
+
+    def _handle_upstream_host(self, channel, value):
+        self._upstream_host = value if channel == 0 and value in (0, 1, 2) else None
+
     def _handle_set_device_address(self, channel, value):
-        """Handle a set-device-address ACK (no state change)."""
+        """Cache the echoed address so the setter can verify its ACK."""
+        self._device_address_reply = (channel << 8) | value
         logger.debug("set_device_address ACK")
 
     def _handle_get_device_address(self, channel, value):
@@ -1639,6 +2818,16 @@ class SmartUSBHub:
             alias = ""
         self.device_alias = alias
 
+    def _handle_auth_certificate(self, channel, value):
+        """Cache the raw V3 status/certificate response for the waiting verifier."""
+        if isinstance(value, dict) and value.get("v3"):
+            self._auth_certificate_response = bytes(value.get("payload", b""))
+
+    def _handle_auth_challenge(self, channel, value):
+        """Cache the raw V3 status/signature response for the waiting verifier."""
+        if isinstance(value, dict) and value.get("v3"):
+            self._auth_challenge_response = bytes(value.get("payload", b""))
+
     def _handle_factory_reset(self, channel, value):
         """Handle a factory-reset ACK (no state change)."""
         logger.debug("factory_reset ACK")
@@ -1671,8 +2860,12 @@ class SmartUSBHub:
         if value == 0xFF or value > 16:
             logger.warning(f"Suspicious max_channels value: {value} (0x{value:02X}); "
                            f"the device may not support this command.")
-            if value == 0xFF and self.product_type is not None:
-                product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            remote_channels = (getattr(self, "_device_capabilities", None) or {}).get("channels")
+            if isinstance(remote_channels, int) and remote_channels > 0:
+                self.max_channels = remote_channels
+                return
+            if value == 0xFF and self.product_type is not None and self.capabilities_source == "legacy":
+                product_info = PRODUCT_CATALOG.get(self.product_type)
                 if product_info is not None:
                     self.max_channels = product_info["channels"]
                     logger.info(f"Inferring max_channels={self.max_channels} "
@@ -1707,15 +2900,24 @@ class SmartUSBHub:
         """Cache auto-restore state from a status reply."""
         self.auto_restore_status = value
 
+    def _channel_mask(self, channels):
+        """Validate and pack the eight-bit channel field without duplicate carries."""
+        maximum = getattr(self, "max_channels", None)
+        maximum = min(maximum, 8) if type(maximum) is int and maximum > 0 else 8
+        mask = 0
+        for channel in channels:
+            if type(channel) is not int or not 1 <= channel <= maximum:
+                raise ValueError("Invalid channel for eight-bit channel mask")
+            mask |= 1 << (channel - 1)
+        return mask
+
     def _resolve_channels(self, channels):
         """
-        --- Helpers -------------------------------------------------------------
-
         Normalize a variadic channel argument, defaulting to all channels.
 
         Accepts either separate channel arguments or a single iterable. When empty,
-        expands to every channel the device has (from ``max_channels``, falling back
-        to the product table or 7).
+        uses ``max_channels`` or the device's declared count. Only legacy firmware
+        falls back to the product table or 7.
 
         :param channels: The variadic channels tuple as received by a public method.
 
@@ -1726,8 +2928,14 @@ class SmartUSBHub:
         if not channels:
             n = self.max_channels
             if not isinstance(n, int) or n <= 0 or n == 0xFF:
-                product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-                n = product_info["channels"] if product_info else 7
+                declared = (getattr(self, "_device_capabilities", None) or {}).get("channels")
+                product_info = PRODUCT_CATALOG.get(self.product_type)
+                if declared:
+                    n = declared
+                elif self.capabilities_source == "legacy":
+                    n = product_info["channels"] if product_info else 7
+                else:
+                    raise RuntimeError("Device did not declare a channel count")
             channels = tuple(range(1, n + 1))
         return channels
 
@@ -1735,8 +2943,8 @@ class SmartUSBHub:
         """
         Return all valid 1-based channel numbers for the connected product.
 
-        Uses the cached max-channel value when available, then falls back to
-        CMD_GET_MAX_CHANNELS and finally the product capability table.
+        Uses the cached count, then CMD_GET_MAX_CHANNELS or the device declaration.
+        Only legacy firmware falls back to the product table.
 
         :returns: Tuple such as (1, 2, 3, 4).
 
@@ -1746,8 +2954,9 @@ class SmartUSBHub:
         if not isinstance(n, int) or n <= 0 or n == 0xFF:
             n = self.get_max_channels()
         if not isinstance(n, int) or n <= 0 or n == 0xFF:
-            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-            n = product_info["channels"] if product_info else None
+            declared_channels = (getattr(self, "_device_capabilities", None) or {}).get("channels")
+            product_info = PRODUCT_CATALOG.get(self.product_type)
+            n = declared_channels or (product_info["channels"] if product_info and self.capabilities_source == "legacy" else None)
         if not isinstance(n, int) or n <= 0 or n == 0xFF:
             raise RuntimeError(f"Cannot determine max channel count: {n!r}")
         return tuple(range(1, n + 1))
@@ -1776,7 +2985,7 @@ class SmartUSBHub:
 
         :param include_stream_meta: Include sample_tick/sample_period_ms entries.
 
-        :returns: Dict {channel: {voltage, current, fresh, stale, valid, ...}}.
+        :returns: Dict {channel: {voltage, current, power, fresh, stale, valid, ...}}.
         """
         result = {}
         for ch in channels:
@@ -1786,6 +2995,7 @@ class SmartUSBHub:
             entry = {
                 "voltage": self.channel_voltages.get(ch),
                 "current": self.channel_currents.get(ch),
+                "power": self.channel_powers.get(ch),
                 "fresh": fresh,
                 "stale": not fresh,
                 "valid": self.channel_measurement_valid.get(ch, valid_default),
@@ -1841,7 +3051,40 @@ class SmartUSBHub:
         major-version field, so this check does not need unsupported-command
         timeouts.
         """
-        return self.firmware_version_major == 1
+        return (self.firmware_version_major == 1 and
+                getattr(self, "_v3_header_len", V3_LEGACY_HEADER_LEN) != V3_HEADER_LEN)
+
+    def _uses_legacy_measurement_queries(self):
+        """Shipped USB2 four-port firmware uses V1 voltage/current queries."""
+        return (getattr(self, "product_type", None) == 0x00
+                and self.capabilities_source == "legacy")
+
+    def get_protocol_info(self):
+        """Return the protocol API version and firmware upgrade recommendation.
+
+        Only known pre-declaration devices receive the SDK legacy baseline.
+        Missing/invalid versions on current devices stay unknown.
+        :returns: Protocol version, source and upgrade recommendation.
+        :rtype: dict
+        """
+        document = getattr(self, "_device_capabilities", None) or {}
+        declaration = document.get("protocol", {})
+        value = declaration.get("version") if isinstance(declaration, dict) else None
+        parts = value.split(".") if isinstance(value, str) else []
+        valid = (len(parts) == 3 and all(p.isascii() and p.isdigit() and
+                 (p == "0" or not p.startswith("0")) for p in parts))
+        if valid:
+            version, source = value, "device"
+        elif self.capabilities_source == "legacy" and getattr(self, "product_type", None) in _LEGACY_PRODUCT_CAPABILITIES:
+            version, source = "1.0.0", "legacy"
+        else:
+            version, source = None, "unavailable"
+        recommended = "1.2.0"
+        upgrade = version is not None and tuple(map(int, version.split("."))) < (1, 2, 0)
+        message = ("当前固件使用兼容模式，基础控制和测量仍可使用，建议更新固件。\n请到此页面下载最新的Control Pannel：https://mixedsignallab.com/download\n下载安装完后会打开说明书，请按照说明书操作。"
+                   if upgrade else "")
+        return dict(version=version, source=source, recommended_version=recommended,
+                    update_recommended=upgrade, message=message)
 
     def get_device_info(self):
         """
@@ -1857,10 +3100,12 @@ class SmartUSBHub:
 
         self.hardware_version = self._retry_get_info(self.get_hardware_version, "hardware_version")
         self.firmware_version = self._retry_get_info(self.get_firmware_version, "firmware_version")
+        self._negotiate_v3_protocol()
+        self._query_device_capabilities()
 
         if self._is_legacy_v1_firmware():
             self.product_type = 0x00
-            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_info = PRODUCT_CATALOG.get(self.product_type)
             self.max_channels = product_info["channels"] if product_info is not None else 4
             self.serial_no = "N/A"
             self.device_alias = ""
@@ -1868,15 +3113,18 @@ class SmartUSBHub:
                         "without probing newer identity commands")
         else:
             self.product_type = self.get_product_type()
-            if self.product_type is None:
+            if self.product_type is None and self.capabilities_source == "legacy":
                 self.product_type = 0x00
                 logger.info("CMD_GET_PRODUCT_TYPE unsupported; defaulting to HBP_USB2_4CH")
 
-            product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
+            product_info = PRODUCT_CATALOG.get(self.product_type)
             # Optional on old firmware: infer channel count from the product type.
             self.max_channels = self.get_max_channels()
             if self.max_channels is None or self.max_channels == 0xFF:
-                if product_info is not None:
+                declared_channels = (getattr(self, "_device_capabilities", None) or {}).get("channels")
+                if declared_channels:
+                    self.max_channels = declared_channels
+                elif product_info is not None and self.capabilities_source == "legacy":
                     self.max_channels = product_info["channels"]
                     logger.info(f"CMD_GET_MAX_CHANNELS unsupported; inferring "
                                 f"max_channels={self.max_channels} from {product_info['name']}")
@@ -1884,23 +3132,34 @@ class SmartUSBHub:
             self.serial_no = self.get_serial_no()  # optional
             self.device_alias = self.get_device_alias() or ""
 
-        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-        if product_info is not None:
-            self.com_timeout = product_info.get("ack_timeout", 0.1)
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        if self.capabilities_source != "legacy":
+            self.com_timeout = 0.5
+        elif product_info is not None:
+            self.com_timeout = _LEGACY_PRODUCT_CAPABILITIES.get(self.product_type, {}).get("ack_timeout", 0.1)
             logger.info(f"ACK timeout set to {self.com_timeout}s for {product_info['name']}")
 
         self.operate_mode = self._retry_get_info(self.get_operate_mode, "operate_mode")
-        self.auto_restore_status = self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
-        self.button_control_status = self._retry_get_info(self.get_button_control_status, "button_control_status")
+        caps = self._get_capabilities()
+        diagnostics = caps.get("device", {}).get("diagnostics", {})
+        if isinstance(diagnostics, dict) and type(diagnostics.get("reset_flags")) is int:
+            logger.info("Device reset flags=0x%08X uptime_ms=%s",
+                        diagnostics["reset_flags"], diagnostics.get("uptime_ms"))
+        self.auto_restore_status = (self._retry_get_info(self.get_auto_restore_status, "auto_restore_status")
+                                    if caps["auto_restore"]["supported"] is not False else None)
+        self.button_control_status = (self._retry_get_info(self.get_button_control_status, "button_control_status")
+                                      if caps["button_control"]["supported"] is not False else None)
         self.device_address = self._retry_get_info(self.get_device_address, "device_address")
 
         # Warm the default-state caches for every channel (best effort).
-        n = self.max_channels if isinstance(self.max_channels, int) and self.max_channels > 0 else 4
-        channels = tuple(range(1, n + 1))
-        self.get_default_power_status(*channels)
-        self.get_default_dataline_status(*channels)
+        n = self.max_channels
+        channels = tuple(range(1, n + 1)) if isinstance(n, int) and 1 <= n <= 16 else ()
+        if channels:
+            self.get_default_power_status(*channels)
+            if self._get_capabilities()["usb2_data_switch"].get("supported") is True:
+                self.get_default_usb2_dataline_status(*channels)
 
-        product_type_name = (product_info["name"] if product_info is not None
+        product_type_name = self._declared_model() or (product_info["name"] if product_info is not None
                              else (f"Unknown({self.product_type})" if self.product_type is not None else "N/A"))
         hub_info = {
             "id": self.port.split("/")[-1],
@@ -1919,6 +3178,15 @@ class SmartUSBHub:
             "button_control_status": "enabled" if self.button_control_status == 1 else "disabled",
         }
 
+        protocol = self.get_protocol_info()
+        hub_info.update(protocol_version=protocol["version"], protocol_version_source=protocol["source"],
+                        firmware_update_recommended=protocol["update_recommended"],
+                        firmware_update_message=protocol["message"])
+        if protocol["update_recommended"] and not getattr(self, "_protocol_upgrade_warned", False):
+            logger.warning("%s [%s, protocol %s, source=%s]", protocol["message"], self.port,
+                           protocol["version"], protocol["source"])
+            self._protocol_upgrade_warned = True
+            warnings.warn(protocol["message"], FirmwareUpdateRecommendedWarning, stacklevel=3)
         if self.operate_mode is None:
             logger.error("Failed to get operate mode after retries - this is critical!")
         for name in ("hardware_version", "firmware_version", "product_type",
@@ -1970,6 +3238,22 @@ class SmartUSBHub:
 
         :returns: True if acknowledged, False otherwise.
         """
+        if state not in (0, 1):
+            raise ValueError("state must be 0 or 1")
+        self._channel_mask(channels)  # Validate before any protection side effects.
+        # A new explicit ON is the user's retry. Keep this handshake for older
+        # alert firmware; the MCU still validates health and enforces protection.
+        caps = getattr(self, '_device_capabilities', None) or {}
+        alerts = caps.get('alerts', {})
+        if state == 1 and isinstance(alerts, dict) and alerts.get('supported') is True:
+            status = self.get_alert_status()
+            if not status or not status['ready'] or status['io_fault']:
+                return False
+            selected = self._resolve_channels(channels)
+            retry_mask = self._channel_mask(ch for ch in selected
+                                            if status['channels'].get(ch, {}).get('trip'))
+            if retry_mask and not self.reset_protection_trip(retry_mask):
+                return False
         self.ack_events[CMD_SET_CHANNEL_POWER].clear()
         self._send_packet(CMD_SET_CHANNEL_POWER, channels, state)
         if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_POWER):
@@ -1986,32 +3270,30 @@ class SmartUSBHub:
 
         :returns: For a single channel, its power state; for multiple, a dict {channel: state}; or None on timeout.
         """
-        if len(channels) > 1:
-            # Drop stale entries, then wait until every requested channel's fresh
-            # reply frame has landed (deterministic; no fixed settle delay).
-            for ch in channels:
-                self.channel_power_status.pop(ch, None)
-            self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
-            self._wait_for_channel_cache(self.channel_power_status, channels)
-            result = {ch: self.channel_power_status[ch]
-                      for ch in channels if ch in self.channel_power_status}
-            return result if result else None
-
-        ack_event = self.ack_events[CMD_GET_CHANNEL_POWER_STATUS]
-        ack_event.clear()
-        self._send_packet(CMD_GET_CHANNEL_POWER_STATUS, channels)
-        if ack_event.wait(self.com_timeout):
-            return self.channel_power_status.get(channels[0])
-        logger.error("get_channel_power_status No ACK!")
-        return None
+        result = self._get_channel_status(CMD_GET_CHANNEL_POWER_MASK, channels)
+        resolved = self._resolve_channels(channels)
+        if result is not None and len(resolved) == 1:
+            return result.get(resolved[0])
+        return result
 
     @synchronized
     def get_channel_oc_status(self):
         """
         Query per-channel overcurrent status.
 
-        :returns: Dict {channel: {'active': bool, 'latch': bool}}, or None on timeout. 'active' is the live FLAG# state; 'latch' is sticky until cleared.
+        :returns: Dict {channel: {'active': bool, 'latch': bool}}, or None on timeout. 'active' is the OC pin/comparator state; 'latch' is OC history until cleared.
+
+        :raises FeatureNotSupportedError: If overcurrent reporting is unavailable.
         """
+        if not self._check_feature_support("overcurrent"):
+            self._raise_overcurrent_unsupported()
+        if self._get_capabilities()["overcurrent"].get("status_api") == "alerts":
+            status = self.get_alert_status()
+            if status is None:
+                return None
+            return {ch: {"active": bool(item["active"] & 1),
+                         "latch": bool(item["history"] & 1)}
+                    for ch, item in status["channels"].items()}
         ack_event = self.ack_events[CMD_GET_CHANNEL_OC_STATUS]
         ack_event.clear()
         self._send_packet(CMD_GET_CHANNEL_OC_STATUS, None, 0)
@@ -2027,10 +3309,23 @@ class SmartUSBHub:
         """
         Clear the sticky overcurrent latch for one or more channels.
 
+        Devices with ``overcurrent.status_api == "alerts"`` use
+        ``clear_alert_latch()`` for history and ``reset_protection_trip()``
+        to unlock protection instead.
+
         :param channels: Channels to clear; no arguments clears all channels.
 
         :returns: True if acknowledged, False otherwise.
+
+        :raises FeatureNotSupportedError: If overcurrent status is unsupported
+            or the device uses the alerts interface.
         """
+        if not self._check_feature_support("overcurrent"):
+            self._raise_overcurrent_unsupported()
+        if self._get_capabilities()["overcurrent"].get("status_api") == "alerts":
+            raise FeatureNotSupportedError(
+                "measurement hardware protection separates history from power locks; use "
+                "clear_alert_latch() for history or reset_protection_trip() to unlock.")
         if not channels:
             n = self.max_channels if isinstance(self.max_channels, int) and 0 < self.max_channels <= 16 else 7
             channels = tuple(range(1, n + 1))
@@ -2045,9 +3340,12 @@ class SmartUSBHub:
     @synchronized
     def set_channel_power_interlock(self, channel):
         """
-        Set interlock mode for a channel, or release all channels.
+        Select the only powered channel, or turn all channels off.
 
-        :param channel: Channel to interlock, or None to turn all channels off.
+        This does not change the operating mode; use ``set_operate_mode()``
+        to configure it.
+
+        :param channel: Channel to power, or None to turn all channels off.
 
         :returns: True if acknowledged, False otherwise.
         """
@@ -2062,16 +3360,25 @@ class SmartUSBHub:
         return False
 
     def _raise_adc_unsupported(self):
-        """
-        Raise a descriptive error when the model lacks ADC monitoring.
-
-        :raises FeatureNotSupportedError: Always.
-        """
-        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-        product_name = product_info["name"] if product_info else f"Unknown({self.product_type:#02x})"
+        """Raise FeatureNotSupportedError when voltage/current monitoring is absent."""
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        product_name = product_info["name"] if product_info else f"Unknown({self.product_type!r})"
         raise FeatureNotSupportedError(
-            f"Product {product_name} does not support voltage/current monitoring (ADC). "
-            f"This feature is not available on this device model.")
+            f"Device {product_name} does not declare voltage/current monitoring support.")
+
+    def _raise_usb2_data_switch_unsupported(self):
+        """Raise a descriptive error when USB2 data-line control is absent."""
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        product_name = product_info["name"] if product_info else f"Unknown({self.product_type!r})"
+        raise FeatureNotSupportedError(
+            f"Device {product_name} does not declare USB2 data-line switching support.")
+
+    def _raise_overcurrent_unsupported(self):
+        """Raise FeatureNotSupportedError when overcurrent status is unsupported."""
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        product_name = product_info["name"] if product_info else f"Unknown({self.product_type!r})"
+        raise FeatureNotSupportedError(
+            f"Device {product_name} does not declare overcurrent status reporting support.")
 
     @synchronized
     def get_channel_voltage(self, channel):
@@ -2125,14 +3432,38 @@ class SmartUSBHub:
         logger.error("get_channel_current No ACK!")
         return None
 
+    def get_channel_power(self, channel):
+        """Query one channel's power in mW, or None if unavailable.
+
+        Uses hardware power from the measurement frame when supplied. Legacy
+        devices fall back to V*I/1000 using their sequential voltage/current
+        queries; that estimate is not a simultaneous hardware power sample.
+        """
+        if isinstance(channel, (list, tuple)):
+            raise ValueError("get_channel_power only supports a single channel")
+        values = self.get_channel_measurements(channel)
+        item = values.get(channel) if values else None
+        if not item or not item.get("valid") or not item.get("fresh"):
+            return None
+        if item.get("power") is not None:
+            return item["power"]
+        v, i = item.get("voltage"), item.get("current")
+        return v * i / 1000.0 if v is not None and i is not None else None
+
     @synchronized
     def get_channel_measurements(self, *channels):
         """
-        Read voltage/current for multiple channels in one V3 request.
+        Send a request and wait for voltage/current/power readings.
+
+        This queries the device; unlike get_cached_measurements(), it does not
+        simply return a cached value. It does not start streaming.
 
         :param channels: Channels to query; if omitted, all channels are queried.
 
-        :returns: Dict {channel: {"voltage", "current", "fresh", "stale", "valid"}}, or None on timeout.
+        :returns: Dict {channel: {"voltage", "current", "power", "fresh", "stale", "valid"}}.
+            Units are mV, mA and mW. ``power`` comes from the device when supplied,
+            is estimated from sequential voltage/current queries on legacy firmware,
+            or is None when unavailable. Returns None if no valid reply is obtained.
 
         :raises FeatureNotSupportedError: If the model lacks ADC monitoring.
         """
@@ -2140,7 +3471,7 @@ class SmartUSBHub:
             self._raise_adc_unsupported()
         channels = self._resolve_channels(channels)
 
-        if self._is_legacy_v1_firmware():
+        if self._is_legacy_v1_firmware() or self._uses_legacy_measurement_queries():
             result = {}
             for ch in channels:
                 voltage_event = self.ack_events[CMD_GET_CHANNEL_VOLTAGE]
@@ -2160,6 +3491,8 @@ class SmartUSBHub:
                 result[ch] = {
                     "voltage": self.channel_voltages.get(ch),
                     "current": self.channel_currents.get(ch),
+                    "power": (self.channel_voltages.get(ch) * self.channel_currents.get(ch) / 1000.0
+                              if self.channel_voltages.get(ch) is not None and self.channel_currents.get(ch) is not None else None),
                     "fresh": True,
                     "stale": False,
                     "valid": True,
@@ -2167,7 +3500,7 @@ class SmartUSBHub:
             return result
 
         ack_event = self.ack_events[CMD_GET_CHANNEL_MEASUREMENTS]
-        channel_mask = sum(1 << (ch - 1) for ch in channels)
+        channel_mask = self._channel_mask(channels)
         for attempt in range(3):
             ack_event.clear()
             self._send_v3_packet(CMD_GET_CHANNEL_MEASUREMENTS, [channel_mask, 0x00])
@@ -2192,19 +3525,26 @@ class SmartUSBHub:
 
     def get_stream_channel_measurements(self, *channels, timeout=None, wait_new_sample=True):
         """
-        Wait for the next V3 measurement stream frame and return its readings.
+        Read the next measurements from an enabled V3 stream.
 
         Does not send a request; the device must already have streaming enabled via
-        ``set_channel_measurement_stream.``
+        :meth:`set_channel_measurement_stream`.
+
+        Batch capture consumes unread samples in order, waiting only when its
+        queue is empty. Other streams wait for a new sample tick or frame.
 
         :param channels: Channels to include; if omitted, all channels.
 
-        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout.``
+        :param timeout: Wait timeout in seconds; defaults to ``self.com_timeout``.
 
-        :param wait_new_sample: If True, wait for a new sample tick; if False, accept the next stream frame even with the same tick.
+        :param wait_new_sample: For non-capture streams, True waits for a new
+            sample tick; False accepts the next frame even with the same tick.
+            Batch capture always consumes its unread queue regardless of this flag.
 
         :returns: Dict of per-channel readings (with sample_tick/sample_period_ms), or None.
         """
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
         channels = self._resolve_channels(channels)
         if timeout is None:
             timeout = self.com_timeout
@@ -2214,6 +3554,9 @@ class SmartUSBHub:
             start_seq = self._measurement_stream_seq
             start_tick = self._measurement_stream_tick
             while True:
+                if self._capture_stream_enabled and self._capture_queue:
+                    sample = self._capture_queue.popleft()
+                    return {ch: sample[ch] for ch in channels if ch in sample}
                 has_channels = any(ch in self.channel_voltages or ch in self.channel_currents
                                    for ch in channels)
                 got_new_frame = self._measurement_stream_seq != start_seq
@@ -2229,6 +3572,22 @@ class SmartUSBHub:
 
             return self._measurement_snapshot(channels, valid_default=False, include_stream_meta=True)
 
+    def discard_measurement_backlog(self):
+        """Advanced App integration: discard unread capture samples on resume."""
+        with self._measurement_stream_condition:
+            self._capture_queue.clear()
+
+    def measurement_stream_counter(self):
+        """Advanced App integration: sample count and host monotonic timestamp.
+
+        Both belong to the same completed RX batch. Pairing a newer counter
+        with an earlier application timestamp biases rate estimates upward.
+        Empty health reports and capture-mode query replies do not count.
+        """
+        with self._measurement_stream_condition:
+            return (self._measurement_stream_seq,
+                    getattr(self, '_measurement_stream_received_at', None))
+
     @synchronized
     def set_channel_measurement_stream(self, *channels, enabled=True, wait_ack=True):
         """
@@ -2243,36 +3602,96 @@ class SmartUSBHub:
 
         :param wait_ack: If True, wait for the command ACK before returning.
 
-        :returns: True on success (or when ``wait_ack`` is False), False on timeout.
+        :returns: True on success (or when ``wait_ack`` is False), False on rejection or timeout.
         """
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
         channels = self._resolve_channels(channels)
-        channel_mask = sum(1 << (ch - 1) for ch in channels)
+        if self._uses_legacy_measurement_queries():
+            if enabled:
+                raise FeatureNotSupportedError("旧固件支持逐通道测量，不支持V3测量流。" + self.get_protocol_info()["message"])
+            return True
+        if self.supports_measurement_capture():
+            return self._capture_stream(enabled, wait_ack)
+        channel_mask = self._channel_mask(channels)
         flags = V3_MEAS_FLAG_STREAM_ENABLE if enabled else V3_MEAS_FLAG_STREAM_DISABLE
         ack_event = self.ack_events[CMD_GET_CHANNEL_MEASUREMENTS]
         ack_event.clear()
         self._send_v3_packet(CMD_GET_CHANNEL_MEASUREMENTS, [channel_mask, flags])
         if not wait_ack:
+            self._track_async_v3_request(CMD_GET_CHANNEL_MEASUREMENTS)
             return True
         if ack_event.wait(self.com_timeout):
             return True
         logger.error("set_channel_measurement_stream No ACK!")
         return False
 
-    def get_latest_measurements(self, *channels):
+    def get_cached_measurements(self, *channels):
         """
-        Return the most recently received measurements without blocking.
+        Return cached measurements without sending a command or waiting.
 
-        Returns whatever the background receiver has cached. Requires that
-        streaming was started via ``set_channel_measurement_stream.``
+        This is not equivalent to a fresh voltage/current query. Cached data
+        may predate this call; fresh/valid describe the last received frame,
+        not an elapsed-time guarantee.
+
+        Returns the latest cache populated by a measurement query or stream.
+        Starting a stream is not required.
 
         :param channels: Channels to include; if omitted, all channels.
 
         :returns: Dict of per-channel readings, or None if nothing has been received.
         """
+        if not self._check_feature_support("adc"):
+            self._raise_adc_unsupported()
+        return self._cached_measurements(channels)
+
+    def _cached_measurements(self, channels):
         channels = self._resolve_channels(channels)
         with self._measurement_stream_condition:
             result = self._measurement_snapshot(channels, valid_default=False, include_stream_meta=True)
         return result if result else None
+
+    def get_latest_measurements(self, *channels):
+        """Deprecated cache-only alias; use get_cached_measurements()."""
+        _warn_legacy_api('get_latest_measurements()', 'get_cached_measurements()')
+        # Published 1.2.1 also permits an empty cache on devices without ADC.
+        return self._cached_measurements(channels)
+
+    @synchronized
+    def set_channel_usb3_dataline(self, *channels, state):
+        """
+        Set the USB3.0 data-line state of one or more channels.
+
+        :param channels: Channels to update.
+
+        :param state: 1 to connect the data line, 0 to disconnect.
+
+        :returns: True if acknowledged, False otherwise.
+        """
+        if not self._check_feature_support("usb3_data_switch"):
+            raise FeatureNotSupportedError("USB3 data switching is not supported by this product")
+        channels = self._resolve_channels(channels)
+        if state not in (0, 1):
+            raise ValueError("state must be 0 or 1")
+        self.ack_events[CMD_SET_CHANNEL_USB3_DATALINE].clear()
+        self._send_packet(CMD_SET_CHANNEL_USB3_DATALINE, channels, state)
+        if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_USB3_DATALINE):
+            return True
+        logger.error("set_channel_usb3_dataline No ACK!")
+        return False
+
+    @synchronized
+    def get_channel_usb3_dataline_status(self, *channels):
+        """
+        Query the USB3.0 data-line status of one or more channels.
+
+        :param channels: Channels to query; if omitted, returns all known channels.
+
+        :returns: Dict {channel: state} for the requested channels, or None on timeout.
+        """
+        if not self._check_feature_support("usb3_data_switch"):
+            raise FeatureNotSupportedError("USB3 data switching is not supported by this product")
+        return self._get_channel_status(CMD_GET_CHANNEL_USB3_DATALINE_MASK, channels)
 
     @synchronized
     def set_channel_usb2_dataline(self, *channels, state):
@@ -2285,6 +3704,8 @@ class SmartUSBHub:
 
         :returns: True if acknowledged, False otherwise.
         """
+        if not self._check_feature_support("usb2_data_switch"):
+            self._raise_usb2_data_switch_unsupported()
         self.ack_events[CMD_SET_CHANNEL_DATALINE].clear()
         self._send_packet(CMD_SET_CHANNEL_DATALINE, channels, state)
         if self._wait_for_ack_with_recovery(CMD_SET_CHANNEL_DATALINE):
@@ -2293,13 +3714,8 @@ class SmartUSBHub:
         return False
 
     def set_channel_dataline(self, *channels, state):
-        """
-        Backward-compatible alias for the V1 API name.
-
-        Older releases exposed USB2 data-line control as
-        ``set_channel_dataline``. Keep that spelling available while the newer
-        API uses ``set_channel_usb2_dataline`` for clarity.
-        """
+        """Deprecated USB2-only alias; use ``set_channel_usb2_dataline()``."""
+        _warn_legacy_api('set_channel_dataline()', 'set_channel_usb2_dataline()')
         return self.set_channel_usb2_dataline(*channels, state=state)
 
     @synchronized
@@ -2311,32 +3727,13 @@ class SmartUSBHub:
 
         :returns: Dict {channel: state} for the requested channels, or None on timeout.
         """
-        if len(channels) > 1:
-            # Drop stale entries, then wait until every requested channel's fresh
-            # reply frame has landed (deterministic; no fixed settle delay).
-            for ch in channels:
-                self.channel_dataline_status.pop(ch, None)
-            self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
-            self._wait_for_channel_cache(self.channel_dataline_status, channels)
-            result = self._filter_channel_dict(self.channel_dataline_status, channels)
-            return result if result else None
-
-        ack_event = self.ack_events[CMD_GET_CHANNEL_DATALINE_STATUS]
-        ack_event.clear()
-        self._send_packet(CMD_GET_CHANNEL_DATALINE_STATUS, channels)
-        if ack_event.wait(self.com_timeout):
-            return self._filter_channel_dict(self.channel_dataline_status, channels)
-        logger.error("get_channel_usb2_dataline_status No ACK!")
-        return None
+        if not self._check_feature_support("usb2_data_switch"):
+            self._raise_usb2_data_switch_unsupported()
+        return self._get_channel_status(CMD_GET_CHANNEL_USB2_DATALINE_MASK, channels)
 
     def get_channel_dataline_status(self, *channels):
-        """
-        Backward-compatible alias for the V1 API name.
-
-        Older releases exposed USB2 data-line status as
-        ``get_channel_dataline_status``. Keep that spelling available while the
-        newer API uses ``get_channel_usb2_dataline_status`` for clarity.
-        """
+        """Deprecated USB2-only alias; use ``get_channel_usb2_dataline_status()``."""
+        _warn_legacy_api('get_channel_dataline_status()', 'get_channel_usb2_dataline_status()')
         return self.get_channel_usb2_dataline_status(*channels)
 
     @synchronized
@@ -2401,24 +3798,15 @@ class SmartUSBHub:
 
         :returns: Dict {channel: {"enabled", "value"}}, or None if no response.
         """
-        ack_event = self.ack_events[CMD_GET_DEFAULT_POWER_STATUS]
-        ack_event.clear()
-        self._send_packet(CMD_GET_DEFAULT_POWER_STATUS, channels, [0, 0])
-        if ack_event.wait(self.com_timeout):
-            result = {}
-            for ch in channels:
-                enable = self.channel_default_power_flag.get(ch)
-                status = self.channel_default_power_status.get(ch)
-                if enable is not None and status is not None:
-                    result[ch] = {"enabled": enable, "value": status}
-            return result
-        logger.error("get_default_power_status No ACK!")
-        return None
+        return self._get_default_status(CMD_GET_DEFAULT_POWER_STATUS, channels,
+                                        self.channel_default_power_flag,
+                                        self.channel_default_power_status,
+                                        CMD_GET_DEFAULT_POWER_MASK)
 
     @synchronized
-    def set_default_dataline_status(self, *channels, enable, status=None):
+    def set_default_usb2_dataline_status(self, *channels, enable, status=None):
         """
-        Set the power-on default data-line state for one or more channels.
+        Set the USB2 power-on default state; USB3 defaults are not changed.
 
         :param channels: Channels to configure.
 
@@ -2428,6 +3816,8 @@ class SmartUSBHub:
 
         :returns: True if acknowledged, False otherwise.
         """
+        if not self._check_feature_support("usb2_data_switch"):
+            self._raise_usb2_data_switch_unsupported()
         if status is None:
             status = 0
         self.ack_events[CMD_SET_DEFAULT_DATALINE_STATUS].clear()
@@ -2438,27 +3828,88 @@ class SmartUSBHub:
         return False
 
     @synchronized
-    def get_default_dataline_status(self, *channels):
+    def get_default_usb2_dataline_status(self, *channels):
         """
-        Query the default data-line configuration for one or more channels.
+        Query the USB2 default configuration; this does not report USB3 defaults.
 
         :param channels: Channels to query.
 
         :returns: Dict {channel: {"enabled", "value"}}, or None if no response.
         """
-        ack_event = self.ack_events[CMD_GET_DEFAULT_DATALINE_STATUS]
-        ack_event.clear()
-        self._send_packet(CMD_GET_DEFAULT_DATALINE_STATUS, channels, [0, 0])
-        if ack_event.wait(self.com_timeout):
-            result = {}
-            for ch in channels:
-                enable = self.channel_default_dataline_flag.get(ch)
-                status = self.channel_default_dataline_status.get(ch)
-                if enable is not None and status is not None:
-                    result[ch] = {"enabled": enable, "value": status}
-            return result
-        logger.error("get_default_dataline_status No ACK!")
-        return None
+        if not self._check_feature_support("usb2_data_switch"):
+            self._raise_usb2_data_switch_unsupported()
+        return self._get_default_status(CMD_GET_DEFAULT_DATALINE_STATUS, channels,
+                                        self.channel_default_dataline_flag,
+                                        self.channel_default_dataline_status,
+                                        CMD_GET_DEFAULT_USB2_DATALINE_MASK)
+
+    def _handle_default_usb3_response(self, channel, value):
+        if isinstance(value, dict) and value.get("v3") and not value.get("stream"):
+            p = value.get("payload", b"")
+            if len(p) == 3 and p[0] and not ((p[1] | p[2]) & ~p[0]):
+                self._default_usb3_reply = bytes(p)
+
+    def _default_usb3_exchange(self, cmd, channels, enable=None, status=None):
+        document = self.get_capability()
+        if not document or document.get("device", {}).get("default_usb3_data") is not True:
+            raise FeatureNotSupportedError("Device does not declare USB3 default configuration")
+        channels = self._resolve_channels(channels)
+        if any(type(ch) is not int or ch < 1 or ch > self.max_channels for ch in channels):
+            raise ValueError("Invalid channel number")
+        mask = self._channel_mask(channels)
+        payload = bytes([mask]) if enable is None else bytes([mask, enable, status])
+        event = self.ack_events[cmd]
+        event.clear()
+        self._default_usb3_reply = None
+        self._send_v3_packet(cmd, payload)
+        if not event.wait(max(1.0, self.com_timeout)):
+            return None
+        p = self._default_usb3_reply
+        if self._last_v3_status.get(cmd) != V3_STATUS_OK or not p or p[0] != mask:
+            return None
+        return {ch: {"enabled": int(bool(p[1] & (1 << (ch - 1)))),
+                     "value": int(bool(p[2] & (1 << (ch - 1))))} for ch in channels}
+
+    @synchronized
+    def set_default_usb3_dataline_status(self, *channels, enable, status=None):
+        """Persist USB3 boot defaults; does not change current data GPIO.
+
+        enable/status accept 0/1 or bool. Disabled entries revert to normal
+        default (value=1). USB2-off and VBUS-off take precedence on restoration.
+        Returns True only after firmware verifies persistence and echoes values.
+        """
+        if type(enable) not in (int, bool) or enable not in (0, 1):
+            raise ValueError("enable must be 0 or 1")
+        status = 0 if status is None else status
+        if type(status) not in (int, bool) or status not in (0, 1):
+            raise ValueError("status must be 0 or 1")
+        result = self._default_usb3_exchange(CMD_SET_DEFAULT_USB3_DATALINE_STATUS,
+                                           channels, int(enable), int(status))
+        return bool(result and all(v == {"enabled": int(enable), "value": int(status) if enable else 1}
+                                   for v in result.values()))
+
+    @synchronized
+    def get_default_usb3_dataline_status(self, *channels):
+        """Query USB3 boot defaults: {channel: {enabled, value}}, None on failure."""
+        document = self.get_capability()
+        if document and document.get("device", {}).get("default_status_mask") is True:
+            if document.get("device", {}).get("default_usb3_data") is not True:
+                raise FeatureNotSupportedError("Device does not declare USB3 default configuration")
+            return self._get_default_status(CMD_GET_DEFAULT_USB3_DATALINE_STATUS, channels,
+                                            self.channel_default_usb3_data_flag,
+                                            self.channel_default_usb3_data_status,
+                                            CMD_GET_DEFAULT_USB3_DATALINE_MASK)
+        return self._default_usb3_exchange(CMD_GET_DEFAULT_USB3_DATALINE_STATUS, channels)
+
+    def set_default_dataline_status(self, *channels, enable, status=None):
+        """Deprecated USB2-only alias; this does not configure USB3 defaults."""
+        _warn_legacy_api('set_default_dataline_status()', 'set_default_usb2_dataline_status()')
+        return self.set_default_usb2_dataline_status(*channels, enable=enable, status=status)
+
+    def get_default_dataline_status(self, *channels):
+        """Deprecated USB2-only alias."""
+        _warn_legacy_api('get_default_dataline_status()', 'get_default_usb2_dataline_status()')
+        return self.get_default_usb2_dataline_status(*channels)
 
     @synchronized
     def set_auto_restore(self, enable: bool):
@@ -2491,6 +3942,48 @@ class SmartUSBHub:
         logger.error("get_auto_restore_status No ACK!")
         return None
 
+    def _require_upstream_host_switch(self):
+        if not self._get_capabilities()["upstream_host_switch"].get("controllable"):
+            raise FeatureNotSupportedError(
+                "Device does not declare controllable upstream host selection")
+
+    @synchronized
+    def set_upstream_host(self, host: int):
+        """Select Host1 or Host2. Current firmware persists selection in Flash.
+
+        Requires the declared upstream-host capability. Unsupported devices raise
+        FeatureNotSupportedError. Returns False on rejection or timeout.
+        :param int host: Upstream host number, 1 or 2.
+        :returns: Whether matching confirmation arrived.
+        :rtype: bool
+        :raises ValueError: Invalid host number.
+        :raises FeatureNotSupportedError: Switching is unsupported.
+        """
+        if isinstance(host, bool) or not isinstance(host, int) or host not in (1, 2):
+            raise ValueError("host must be 1 or 2")
+        self._require_upstream_host_switch()
+        self._upstream_host = None
+        event = self.ack_events[CMD_SET_UPSTREAM_HOST]
+        event.clear()
+        self._send_packet(CMD_SET_UPSTREAM_HOST, None, host)
+        return event.wait(self.com_timeout) and self._upstream_host == host
+
+    @synchronized
+    def get_upstream_host(self):
+        """Return 0/1/2, or None on device rejection/communication failure.
+
+        Unsupported products/firmware raise FeatureNotSupportedError.
+        :returns: Firmware host value 0, 1 or 2, or None.
+        :rtype: int or None
+        :raises FeatureNotSupportedError: Switching is unsupported.
+        """
+        self._require_upstream_host_switch()
+        self._upstream_host = None
+        event = self.ack_events[CMD_GET_UPSTREAM_HOST]
+        event.clear()
+        self._send_packet(CMD_GET_UPSTREAM_HOST, None, 0)
+        return self._upstream_host if event.wait(self.com_timeout) else None
+
     @synchronized
     def set_device_address(self, address: int):
         """
@@ -2508,8 +4001,9 @@ class SmartUSBHub:
         msb = (address >> 8) & 0xFF
         ack_event = self.ack_events[CMD_SET_DEVICE_ADDRESS]
         ack_event.clear()
+        self._device_address_reply = None
         self._send_packet(CMD_SET_DEVICE_ADDRESS, msb, lsb)
-        if ack_event.wait(self.com_timeout):
+        if ack_event.wait(self.com_timeout) and self._device_address_reply == address:
             self.device_address = address
             return True
         logger.error("set_device_address No ACK!")
@@ -2529,6 +4023,23 @@ class SmartUSBHub:
             return self.device_address
         logger.error("get_device_address No ACK!")
         return None
+
+    @synchronized
+    def reset_hub(self):
+        """Reset only the USB data Hub; attached USB devices disconnect.
+
+        MCU/CMD and port power policies are not reset. Hub volatile chip
+        configuration returns to reset/OTP defaults. Requires firmware declaring
+        device.reset_hub=true; older firmware is never probed destructively.
+        """
+        document = self.get_capability()
+        if not document or document.get("device", {}).get("reset_hub") is not True:
+            raise FeatureNotSupportedError("Device does not declare Hub reset support")
+        event = self.ack_events[CMD_RESET_HUB]
+        event.clear()
+        self._send_v3_packet(CMD_RESET_HUB)
+        return bool(event.wait(max(2.0, self.com_timeout)) and
+                    self._last_v3_status.get(CMD_RESET_HUB) == V3_STATUS_OK)
 
     @synchronized
     def reboot_mcu(self):
@@ -2605,20 +4116,19 @@ class SmartUSBHub:
 
     @staticmethod
     def _encode_device_alias(alias):
-        return SmartUSBHub._encode_utf8_fit(alias, 31)
+        return SmartUSBHub._encode_utf8_fit(alias, 15)
 
     @synchronized
     def set_device_alias(self, alias):
         """
         Store a custom device alias in the device.
 
-        Empty aliases clear the custom alias. Alias is UTF-8, up to 31 bytes.
+        Empty aliases clear the custom alias. Alias is UTF-8, up to 15 bytes.
 
         :returns: True if acknowledged, False otherwise.
         """
         ack_event = self.ack_events[CMD_SET_DEVICE_ALIAS]
         ack_event.clear()
-        self.device_alias = ""
         self._send_v3_packet(CMD_SET_DEVICE_ALIAS, self._encode_device_alias(alias))
         if ack_event.wait(max(0.2, self.com_timeout)):
             return True
@@ -2630,7 +4140,7 @@ class SmartUSBHub:
         """
         Query the custom device alias.
 
-        :returns: Alias string, "" when unset, or None if no response.
+        :returns: Alias string, or "" if unset or no response is received.
         """
         ack_event = self.ack_events[CMD_GET_DEVICE_ALIAS]
         ack_event.clear()
@@ -2656,7 +4166,6 @@ class SmartUSBHub:
             raise ValueError("channel must be >= 1")
         ack_event = self.ack_events[CMD_SET_CHANNEL_NAME]
         ack_event.clear()
-        self.channel_names.pop(channel, None)
         payload = bytes([channel]) + self._encode_channel_name(name)
         self._send_v3_packet(CMD_SET_CHANNEL_NAME, payload)
         if ack_event.wait(max(0.2, self.com_timeout)):
@@ -2669,7 +4178,7 @@ class SmartUSBHub:
         """
         Query a channel display name from the device.
 
-        :returns: Stored name, default CHn, or None if no response.
+        :returns: Stored name, or default CHn if unset or no response is received.
         """
         channel = int(channel)
         if channel < 1:
@@ -2687,6 +4196,224 @@ class SmartUSBHub:
         """Query display names for one or more channels."""
         resolved = self._resolve_channels(channels)
         return {ch: self.get_channel_name(ch) for ch in resolved}
+
+    @staticmethod
+    def _load_auth_issuer_public_key(key_material, ec, serialization):
+        """Normalize a P-256 public-key object, PEM/DER, or SEC1 encoded point."""
+        if hasattr(key_material, "verify") and hasattr(key_material, "curve"):
+            key = key_material
+        else:
+            if isinstance(key_material, str):
+                key_material = key_material.encode("ascii")
+            if not isinstance(key_material, (bytes, bytearray)):
+                raise AuthenticationTrustError("Trusted issuer key has an unsupported type.")
+            encoded = bytes(key_material)
+            try:
+                if encoded.startswith(b"-----BEGIN"):
+                    key = serialization.load_pem_public_key(encoded)
+                elif len(encoded) in (33, 65) and encoded[:1] in (b"\x02", b"\x03", b"\x04"):
+                    key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), encoded)
+                else:
+                    key = serialization.load_der_public_key(encoded)
+            except Exception as exc:
+                raise AuthenticationTrustError("Trusted issuer public key is invalid.") from exc
+
+        if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
+            raise AuthenticationTrustError("Trusted issuer key must be a P-256 public key.")
+        return key
+
+    @staticmethod
+    def _parse_auth_certificate(certificate):
+        """Parse and structurally validate the canonical 125-byte certificate."""
+        certificate = bytes(certificate)
+        if len(certificate) != AUTH_CERTIFICATE_SIZE:
+            raise DeviceAuthenticationCommunicationError(
+                f"Certificate has {len(certificate)} bytes; expected {AUTH_CERTIFICATE_SIZE}.")
+        if certificate[:4] != AUTH_CERT_MAGIC:
+            raise DeviceAuthenticationRejectedError("Certificate magic is invalid.")
+        if certificate[4] != AUTH_CERT_VERSION:
+            raise DeviceAuthenticationRejectedError(
+                f"Unsupported certificate format version {certificate[4]}.")
+        if certificate[5] != AUTH_ALGORITHM_P256_SHA256:
+            raise DeviceAuthenticationRejectedError(
+                f"Unsupported certificate algorithm {certificate[5]}.")
+        if certificate[15] != 0:
+            raise DeviceAuthenticationRejectedError("Certificate reserved field is not canonical.")
+        if certificate[28] not in (0x02, 0x03):
+            raise DeviceAuthenticationRejectedError("Certificate public key is not compressed P-256.")
+
+        return {
+            "certificate": certificate,
+            "issuer_id": int.from_bytes(certificate[6:8], "big"),
+            "certificate_serial": int.from_bytes(certificate[8:12], "big"),
+            "product_type": certificate[12],
+            "hardware_major": certificate[13],
+            "hardware_minor": certificate[14],
+            "device_uid": certificate[16:28],
+            "public_key_compressed": certificate[28:61],
+            "issuer_signature": certificate[61:125],
+        }
+
+    @staticmethod
+    def _raise_auth_status(status, operation):
+        """Translate a firmware authentication status into a stable SDK exception."""
+        if status == AUTH_STATUS_UNSUPPORTED:
+            raise AuthenticationNotSupportedError(
+                f"Device firmware does not support {operation} authentication.")
+        labels = {
+            AUTH_STATUS_INVALID_REQUEST: "invalid request",
+            AUTH_STATUS_NOT_PROVISIONED: "device is not provisioned",
+            AUTH_STATUS_INVALID_PROVISIONING: "device provisioning is invalid",
+            AUTH_STATUS_SIGNING_FAILED: "device challenge signing failed",
+        }
+        label = labels.get(status, f"unknown status 0x{status:02X}")
+        raise DeviceAuthenticationRejectedError(f"Authentication rejected: {label}.")
+
+    @synchronized
+    def authenticate_device(self, trusted_issuers, nonce=None, timeout=2.0):
+        """
+        Optionally verify the per-device certificate and a fresh P-256 challenge.
+
+        This method is deliberately not called by the constructor. Open protocols,
+        Python automation and user-developed software remain usable without any
+        authentication policy; official applications can call this method after
+        connecting and enforce their own policy.
+
+        ``trusted_issuers`` maps the certificate's integer issuer ID to a P-256
+        public key. Values may be cryptography public-key objects, PEM/DER bytes,
+        PEM strings, or compressed/uncompressed SEC1 points.
+
+        ``timeout`` controls the certificate exchange and is also used as the
+        caller-requested lower bound for the challenge exchange.  The challenge
+        always receives at least ``AUTH_CHALLENGE_TIMEOUT_MIN`` seconds because
+        current HBL firmware performs P-256 signing in software on the MCU.
+
+        :returns: A dict containing authenticated certificate metadata.
+
+        :raises AuthenticationNotSupportedError: Firmware has no authentication commands.
+        :raises DeviceAuthenticationCommunicationError: The exchange times out or is malformed.
+        :raises AuthenticationTrustError: The issuer is absent from the supplied trust store.
+        :raises DeviceAuthenticationRejectedError: A certificate or proof is invalid.
+        :raises AuthenticationDependencyError: Install ``smartusbhub[auth]`` first.
+        """
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, utils
+        except ImportError as exc:
+            raise AuthenticationDependencyError(
+                "Device authentication requires the optional 'cryptography' package; "
+                "install smartusbhub[auth].") from exc
+
+        if not isinstance(trusted_issuers, dict):
+            raise AuthenticationTrustError("trusted_issuers must be a mapping keyed by issuer ID.")
+        if nonce is None:
+            nonce = os.urandom(AUTH_NONCE_SIZE)
+        else:
+            nonce = bytes(nonce)
+        if len(nonce) != AUTH_NONCE_SIZE:
+            raise ValueError(f"nonce must be exactly {AUTH_NONCE_SIZE} bytes")
+        timeout = max(float(timeout), self.com_timeout)
+
+        cert_event = self.ack_events[CMD_AUTH_GET_CERTIFICATE]
+        cert_event.clear()
+        self._auth_certificate_response = None
+        self._send_v3_packet(CMD_AUTH_GET_CERTIFICATE, b"")
+        if not self._wait_for_ack_with_recovery(CMD_AUTH_GET_CERTIFICATE, timeout):
+            if self._auth_certificate_response and self._auth_certificate_response[0]:
+                self._raise_auth_status(self._auth_certificate_response[0], "certificate")
+            raise DeviceAuthenticationCommunicationError(
+                "Timed out while reading the device certificate.")
+        response = self._auth_certificate_response
+        if not response:
+            raise DeviceAuthenticationCommunicationError("Empty certificate response.")
+        if response[0] != AUTH_STATUS_OK:
+            self._raise_auth_status(response[0], "certificate")
+        if len(response) != 1 + AUTH_CERTIFICATE_SIZE:
+            raise DeviceAuthenticationCommunicationError(
+                f"Certificate response has {len(response)} bytes; expected "
+                f"{1 + AUTH_CERTIFICATE_SIZE}.")
+
+        info = self._parse_auth_certificate(response[1:])
+        if self.product_type is not None and info["product_type"] != self.product_type:
+            raise DeviceAuthenticationRejectedError(
+                "Certificate product type does not match the connected device.")
+        if self.hardware_version is not None and info["hardware_major"] != self.hardware_version:
+            raise DeviceAuthenticationRejectedError(
+                "Certificate hardware version does not match the connected device.")
+
+        issuer_material = trusted_issuers.get(info["issuer_id"])
+        if issuer_material is None:
+            issuer_material = trusted_issuers.get(str(info["issuer_id"]))
+        if issuer_material is None:
+            raise AuthenticationTrustError(
+                f"No trusted public key for issuer ID {info['issuer_id']}.")
+        issuer_key = self._load_auth_issuer_public_key(issuer_material, ec, serialization)
+
+        issuer_raw_signature = info["issuer_signature"]
+        issuer_der_signature = utils.encode_dss_signature(
+            int.from_bytes(issuer_raw_signature[:32], "big"),
+            int.from_bytes(issuer_raw_signature[32:], "big"),
+        )
+        try:
+            issuer_key.verify(
+                issuer_der_signature,
+                info["certificate"][:61],
+                ec.ECDSA(hashes.SHA256()),
+            )
+            device_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), info["public_key_compressed"])
+        except (InvalidSignature, ValueError) as exc:
+            raise DeviceAuthenticationRejectedError(
+                "Device certificate signature is invalid.") from exc
+
+        challenge_event = self.ack_events[CMD_AUTH_CHALLENGE]
+        challenge_event.clear()
+        self._auth_challenge_response = None
+        self._send_v3_packet(CMD_AUTH_CHALLENGE, nonce)
+        challenge_timeout = max(timeout, AUTH_CHALLENGE_TIMEOUT_MIN)
+        if not self._wait_for_ack_with_recovery(CMD_AUTH_CHALLENGE, challenge_timeout):
+            if self._auth_challenge_response and self._auth_challenge_response[0]:
+                self._raise_auth_status(self._auth_challenge_response[0], "challenge")
+            raise DeviceAuthenticationCommunicationError(
+                "Timed out while waiting for the device challenge signature.")
+        response = self._auth_challenge_response
+        if not response:
+            raise DeviceAuthenticationCommunicationError("Empty challenge response.")
+        if response[0] != AUTH_STATUS_OK:
+            self._raise_auth_status(response[0], "challenge")
+        if len(response) != 1 + AUTH_SIGNATURE_SIZE:
+            raise DeviceAuthenticationCommunicationError(
+                f"Challenge response has {len(response)} bytes; expected "
+                f"{1 + AUTH_SIGNATURE_SIZE}.")
+
+        raw_signature = response[1:]
+        der_signature = utils.encode_dss_signature(
+            int.from_bytes(raw_signature[:32], "big"),
+            int.from_bytes(raw_signature[32:], "big"),
+        )
+        challenge_hash = hashlib.sha256(
+            AUTH_CHALLENGE_DOMAIN + nonce +
+            hashlib.sha256(info["certificate"]).digest()
+        ).digest()
+        try:
+            device_key.verify(
+                der_signature,
+                challenge_hash,
+                ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+            )
+        except InvalidSignature as exc:
+            raise DeviceAuthenticationRejectedError(
+                "Device challenge signature is invalid.") from exc
+
+        info = dict(info)
+        info.pop("issuer_signature", None)
+        info["device_uid"] = info["device_uid"].hex()
+        info["public_key_fingerprint"] = hashlib.sha256(
+            info["public_key_compressed"]).hexdigest()
+        info["authenticated"] = True
+        self.authentication_info = info
+        return info
 
     @synchronized
     def get_firmware_version(self):
@@ -2715,11 +4442,10 @@ class SmartUSBHub:
         return self.firmware_version_major
 
     def get_firmware_version_string(self):
-        """Return a display string such as ``V2.1`` for the cached firmware.
+        """Format the cached firmware version for display.
 
-        Format is ``V<major>.<minor>`` (minor is NOT zero-padded), e.g. major=2
-        minor=1 -> ``V2.1``. (Older builds padded the minor to two digits, which
-        rendered as the confusing ``V2.01``.)
+        Returns ``V<major>.<minor>`` without zero padding, or ``V1.0.0`` for
+        the first public USB3 release. Returns "Unknown" when unavailable.
         """
         major = self.firmware_version_major if self.firmware_version_major is not None else 1
         minor = self.firmware_version_minor
@@ -2727,6 +4453,10 @@ class SmartUSBHub:
             minor = self.firmware_version
         if minor is None:
             return "Unknown"
+        # USB3 first public release: the existing wire header carries major/minor;
+        # patch zero is implicit and does not change the DFU header layout.
+        if self.product_type == 0x04 and major == 1 and minor == 0 and not self._is_legacy_v1_firmware():
+            return "V1.0.0"
         return f"V{major}.{minor}"
 
     @synchronized
@@ -2762,6 +4492,13 @@ class SmartUSBHub:
         logger.debug("get_product_type No ACK (may be old firmware)")
         return None
 
+    def _declared_model(self):
+        # BASIC/ADV share the USB3 firmware/authentication family ID 0x04.
+        model = (getattr(self, "_device_capabilities", None) or {}).get("model")
+        if self.product_type == 0x04 and model in ("HBP_USB3_4CH", "HBP_USB3_4CH_ADV"):
+            return model
+        return None
+
     @synchronized
     def get_product_name(self):
         """
@@ -2773,8 +4510,8 @@ class SmartUSBHub:
             self.product_type = self.get_product_type()
         if self.product_type is None:
             return None
-        product_info = PRODUCT_TYPE_TABLE.get(self.product_type)
-        return product_info["name"] if product_info is not None else f"Unknown({self.product_type:#02x})"
+        product_info = PRODUCT_CATALOG.get(self.product_type)
+        return self._declared_model() or (product_info["name"] if product_info is not None else f"Unknown({self.product_type:#02x})")
 
     @synchronized
     def get_max_channels(self):
@@ -2816,6 +4553,41 @@ class SmartUSBHub:
             return self.serial_no
         logger.debug("get_serial_no No ACK (may be old firmware)")
         return None
+
+
+def decode_usb3_capture_batch(payload):
+    """Decode 0x28 measurement STREAM batches (not the one-byte command ACK).
+
+    Timestamps bound the host-requested measurement hardware snapshot: ``refresh_us`` is the
+    request time and ``read_us`` the completed read, NOT the ADC conversion
+    instant or USB send time. Values use mV/mA. All counters wrap at 2**32.
+    Conversion count identifies measurement hardware progress independently of MCU sequence.
+    """
+    import struct
+    payload = bytes(payload)
+    if len(payload) < 16:
+        raise ValueError("Truncated capture header")
+    version, count, record_size, mask, drops, errors, duplicates = struct.unpack_from(
+        '<4B3I', payload)
+    if (version not in (1, 2, 3) or not 0 <= count <= 7 or record_size != 48
+            or (mask & 15) != 15 or mask not in (15, 31)
+            or (version == 1 and mask != 15)):
+        raise ValueError("Unsupported capture format")
+    header = 20 if version >= 3 else 16
+    if len(payload) != header + count * record_size:
+        raise ValueError("Invalid capture length")
+    rate = struct.unpack_from('<H', payload, 16)[0] if version >= 3 else 500
+    if not 0 < rate <= 65535:
+        raise ValueError('Invalid sample rate')
+    records = []
+    for offset in range(header, len(payload), record_size):
+        values = struct.unpack_from('<4I8H', payload, offset)
+        records.append(dict(sequence=values[0], refresh_us=values[1],
+                            read_us=values[2], conversion_count=values[3],
+                            voltage_mv=list(values[4:8]), current_ma=list(values[8:12])))
+        records[-1]['power_uw'] = list(struct.unpack_from('<4I', payload, offset + 32))
+    return dict(drops=drops, errors=errors, duplicates=duplicates, records=records,
+                filter=(mask >> 4) & 1, sample_rate=rate)
 
 
 # Disconnect every open instance on interpreter exit as a safety net for callers
