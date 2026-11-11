@@ -2,6 +2,18 @@
 
 [简体中文](./CHANGELOG_cn.md)
 
+## [1.3.1] - 2026-11-12
+
+### Fixed
+
+- Decode older V3 measurement payloads with four-byte voltage/current records, including shipped seven-port firmware, while retaining eight-byte records with hardware power. Clear unavailable hardware-power cache entries so `get_channel_power()` can use voltage/current fallback.
+- Accept empty or matching one-byte acknowledgements for streaming enable/disable requests. Unsolicited samples cannot acknowledge a command, and a later one-shot query still requires a complete measurement payload.
+- Reject malformed or truncated measurement replies without reporting success, changing valid cached measurements or publishing a stream sample.
+
+### Compatibility
+
+- Public API signatures, runtime dependencies and the protocol API version are unchanged from 1.3.0. Existing 1.3.0 scripts can upgrade without changes.
+
 ## [1.3.0] - 2026-11-11
 
 ### Added

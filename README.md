@@ -4,7 +4,9 @@
 
 **Documentation map**: [Quick Start](#quick-start) · [Communication Protocol](./docs/protocol.md) · [Product Documentation](./docs/README.md) · [Examples Guide](./examples/README.md)
 
-**Documentation version**: v1.3.0 · Last updated: November 10, 2026
+**Documentation version**: v1.3.1 · Last updated: November 12, 2026
+
+SDK 1.3.1 fixes compatibility with older V3 measurement data and streaming-control acknowledgements. Public APIs and the protocol API version are unchanged; see the [changelog](./CHANGELOG.md) for details.
 
 This documentation applies to SmartUSBHub models supported by the SDK. Before use, confirm your device model and select the corresponding product documentation.
 

@@ -6,7 +6,7 @@
 
 """Public package interface for the SmartUSBHub library."""
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Prefer a relative import (source checkout); fall back to absolute (installed
 # as a top-level module via py-modules).

@@ -26,7 +26,7 @@ from functools import wraps
 import serial
 import serial.tools.list_ports
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Detect file-lock backends; Windows uses a named mutex in _PortLock.acquire.
 # Define both flags so either can be checked regardless of the available backend.
@@ -2177,6 +2177,14 @@ class SmartUSBHub:
                     event.on_timeout = lambda: self._cancel_v3_request(cmd, request_id)
         else:
             packet = _Codec.encode_v3(cmd, payload, header_len=header_len)
+        if cmd == CMD_GET_CHANNEL_MEASUREMENTS:
+            event = self.ack_events.get(cmd)
+            if event is not None:
+                flags = packet[header_len + 1] if len(packet) == header_len + 2 else 0
+                event.measurement_control_ack = {
+                    V3_MEAS_FLAG_STREAM_ENABLE: b"\x01",
+                    V3_MEAS_FLAG_STREAM_DISABLE: b"\x00",
+                }.get(flags)
         try:
             with self._send_lock:
                 elapsed = time.time() - self._last_send_time
@@ -2422,10 +2430,18 @@ class SmartUSBHub:
     def _handle_get_channel_measurements(self, channel, value):
         """Route a measurement frame to the V3 or legacy decoder."""
         if isinstance(value, dict) and value.get("v3"):
-            self._handle_v3_measurements(
-                value.get("payload", b""),
+            payload = value.get("payload", b"")
+            event = getattr(self, "ack_events", {}).get(CMD_GET_CHANNEL_MEASUREMENTS)
+            control_ack = getattr(event, "measurement_control_ack", None)
+            decoded = (not value.get("stream") and control_ack is not None
+                       and payload in (b"", control_ack))
+            decoded = decoded or self._handle_v3_measurements(
+                payload,
                 update_stream=(not getattr(self, '_capture_stream_enabled', False)
                                or bool(value.get('stream'))))
+            if not value.get("stream"):
+                if event is not None:
+                    event.response_ok = decoded
         else:
             self._handle_legacy_measurements(value)
 
@@ -2660,13 +2676,12 @@ class SmartUSBHub:
         """
         if not isinstance(value, (bytes, bytearray)):
             logger.error("Invalid V3 measurement response")
-            return
+            return False
 
         payload = bytes(value)
-        self._last_v3_status[CMD_GET_CHANNEL_MEASUREMENTS] = V3_STATUS_OK
         if len(payload) < 8:
             logger.error("Invalid V3 measurement payload")
-            return
+            return False
 
         channel_mask = payload[0]
         fresh_mask = payload[1]
@@ -2674,19 +2689,26 @@ class SmartUSBHub:
         sample_period_ms = payload[3]
         sample_tick = (payload[4] | (payload[5] << 8)
                        | (payload[6] << 16) | (payload[7] << 24))
-        if len(payload) != 8 + 8 * len(self._convert_channel(channel_mask)):
+        channels = self._convert_channel(channel_mask)
+        record_size = 8
+        if (getattr(self, "_v3_header_len", V3_HEADER_LEN) == V3_LEGACY_HEADER_LEN
+                and len(payload) == 8 + 4 * len(channels)):
+            # Shipped 10-byte V3 firmware predates the hardware power field.
+            record_size = 4
+        elif len(payload) != 8 + 8 * len(channels):
             logger.error("Invalid measurement length; upgrade device firmware and SDK together")
-            return
+            return False
+        self._last_v3_status[CMD_GET_CHANNEL_MEASUREMENTS] = V3_STATUS_OK
         pos = 8
         updated = []
         with self._measurement_stream_condition:
-            for ch in self._convert_channel(channel_mask):
-                if pos + 8 > len(payload):
-                    logger.error("Truncated V3 measurement payload")
-                    break
+            for ch in channels:
                 self.channel_voltages[ch] = payload[pos] | (payload[pos + 1] << 8)
                 self.channel_currents[ch] = payload[pos + 2] | (payload[pos + 3] << 8)
-                self.channel_powers[ch] = int.from_bytes(payload[pos + 4:pos + 8], "little") / 1000.0
+                if record_size == 8:
+                    self.channel_powers[ch] = int.from_bytes(payload[pos + 4:pos + 8], "little") / 1000.0
+                else:
+                    self.channel_powers.pop(ch, None)
                 self.channel_measurement_fresh[ch] = bool(fresh_mask & (1 << (ch - 1)))
                 self.channel_measurement_valid[ch] = bool(valid_mask & (1 << (ch - 1)))
                 self.channel_measurement_sample_tick[ch] = sample_tick
@@ -2694,7 +2716,7 @@ class SmartUSBHub:
                 logger.debug(f"V3 measurement: ch{ch} = {self.channel_voltages[ch]} mV, "
                              f"{self.channel_currents[ch]} mA, period={sample_period_ms} ms, "
                              f"tick={sample_tick}")
-                pos += 8
+                pos += record_size
 
             if updated and update_stream:
                 self._measurement_stream_tick = sample_tick
@@ -2702,6 +2724,7 @@ class SmartUSBHub:
                 self._measurement_stream_seq += 1
                 self._measurement_stream_received_at = time.monotonic()
                 self._measurement_stream_condition.notify_all()
+        return True
 
     def _handle_set_channel_dataline(self, channel, value):
         """Cache per-channel USB2 data-line state from a set ACK."""
